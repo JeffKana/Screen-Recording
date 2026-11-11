@@ -1,5 +1,6 @@
 # ---- 构建产物 ----
 build-*/
+dist/
 out/
 .vs/
 CMakeCache.txt
@@ -32,6 +33,7 @@ tasks/**/artifacts/
 tmp/
 *.tmp
 *.zip
+tmp-*.ps1
 
 # ---- 本地环境 ----
 .env
