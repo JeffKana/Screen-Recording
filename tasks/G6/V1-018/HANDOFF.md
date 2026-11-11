@@ -24,6 +24,18 @@
 3. **V1.5 排期**：M3-04#1 需要「应用层 VBV」或「换可做逐帧 QP 的编码器」二选一，
    后者引入三方依赖需 O0 批准（见 `docs/17 §8`）。
 
+## 2.1 交付通道状态（本机环境，如实记录）
+
+- 分支已推送：`git push -u origin round/45` 成功（`* [new branch] round/45 -> round/45`）。
+- **PR 未能在本机创建**：`gh pr create` 对 `api.github.com` 的连接超时
+  （`dial tcp 20.205.243.168:443: connectex: ...`，重试 2 次同样失败），
+  `gh pr checks --watch` 因此也无从跑。**这不是代码/CI 问题，是本机出网限制。**
+- 请 O0 用下面任一方式补建 PR（标题与正文已备好，正文见本轮 PR 描述草稿）：
+  - 网页：<https://github.com/JeffKana/Screen-Recording/pull/new/round/45>
+  - CLI（能连 api 的机器上）：`gh pr create --base main --head round/45 --title "round/45 G6 M3-04#1 选项 A 实测（无效，报 PARTIAL）+ 7 条逐条定性 + 用例与矩阵（3 卡）" --body-file <正文>`
+- CI 只跑 `checks / build(msvc) / build(mingw)`（不跑集成用例），三项本地已等价复核：
+  四项静态检查 8/8 + 覆盖 PASS + 卡面 0 冲突 + 文件域 0 mismatch；MSVC/MinGW 均零告警。
+
 ## 3. 已知限制是什么？
 
 - `docs/19` 的 4 条 BLOCKED 全部是硬环境条件（机型/OS/独显），本机无法绕过，
