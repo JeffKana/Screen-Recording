@@ -1,0 +1,7 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "screen-recorder",
+  "version": "0.1.0",
+  "description": "Windows screen recorder. Dependency set is frozen by CONTRACT.md; the G1 stage allows none.",
+  "dependencies": []
+}

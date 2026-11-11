@@ -1,0 +1,39 @@
+# ---- 构建产物 ----
+build-*/
+out/
+.vs/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.vcxproj
+*.vcxproj.*
+*.sln
+*.exe
+*.dll
+*.lib
+*.pdb
+*.obj
+*.ilk
+*.exp
+*.iobj
+*.ipdb
+
+# ---- 录制 / 验收产物（体积大，不入库）----
+verify/artifacts/
+tasks/**/artifacts/
+*.mkv
+*.mkv.part
+*.part
+*.recovered.mkv
+*.repaired
+
+# ---- 运行时与临时 ----
+*.log
+tmp/
+*.tmp
+*.zip
+
+# ---- 本地环境 ----
+.env
+.env.*
+*.local
