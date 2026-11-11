@@ -51,14 +51,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 不用 VS 生成器：runner 上 CMake 找不到 VS 实例（"could not find any instance of Visual Studio"）。
+      # 改为把 MSVC 环境注入当前 shell，再用 Ninja 构建，等价且更稳。
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       - name: configure
         shell: pwsh
-        run: cmake -S . -B build-msvc -G "Visual Studio 17 2022" -A x64
+        run: cmake -S . -B build-msvc -G Ninja -DCMAKE_BUILD_TYPE=Release
 
       - name: build Release 并拦截告警
         shell: pwsh
         run: |
-          cmake --build build-msvc --config Release 2>&1 | Tee-Object -FilePath build-msvc.log
+          cmake --build build-msvc 2>&1 | Tee-Object -FilePath build-msvc.log
           if ($LASTEXITCODE -ne 0) { Write-Error "build failed ($LASTEXITCODE)"; exit 1 }
           $w = Select-String -Path build-msvc.log -Pattern 'warning C\d+|warning:' -ErrorAction SilentlyContinue
           if ($w) {
