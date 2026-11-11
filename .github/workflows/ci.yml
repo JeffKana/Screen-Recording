@@ -1,0 +1,99 @@
+name: ci
+
+# SOP（docs/20）：PR → CI 全绿 → 验收 → 合并。
+# 本流水线只保证「编译得过 + 文档/契约/覆盖不漂」；
+# 集成用例（g3_*/g4_*/g5_*/ui_smoke）依赖真实桌面与 GPU，由验收方在本机独立重跑。
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: checks (contract/coverage/cards/domain)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 契约核验
+        shell: pwsh
+        run: python verify/tools/contract_check.py
+
+      - name: 覆盖表是否最新
+        shell: pwsh
+        run: python verify/tools/coverage_report.py --check
+
+      - name: 卡面一致性
+        shell: pwsh
+        run: python verify/tools/card_consistency_check.py
+
+      - name: 文件域表一致性
+        shell: pwsh
+        run: python verify/tools/domain_table_check.py
+
+  build-msvc:
+    name: build (msvc, warnings=0)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: configure
+        shell: pwsh
+        run: cmake -S . -B build-msvc -G "Visual Studio 17 2022" -A x64
+
+      - name: build Release 并拦截告警
+        shell: pwsh
+        run: |
+          cmake --build build-msvc --config Release 2>&1 | Tee-Object -FilePath build-msvc.log
+          if ($LASTEXITCODE -ne 0) { Write-Error "build failed ($LASTEXITCODE)"; exit 1 }
+          $w = Select-String -Path build-msvc.log -Pattern 'warning C\d+|warning:' -ErrorAction SilentlyContinue
+          if ($w) {
+            $w | Select-Object -First 20 | ForEach-Object { $_.Line }
+            Write-Error "build produced $($w.Count) warning(s)"
+            exit 1
+          }
+          Write-Host "build ok, warnings=0"
+
+  build-mingw:
+    name: build (mingw, warnings=0)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+
+      - name: configure + build
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-mingw -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-mingw 2>&1 | tee build-mingw.log
+          if grep -qE 'warning:' build-mingw.log; then
+            grep -E 'warning:' build-mingw.log | head -20
+            echo "build produced warnings"
+            exit 1
+          fi
+          echo "build ok, warnings=0"
