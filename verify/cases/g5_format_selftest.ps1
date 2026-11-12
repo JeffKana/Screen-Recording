@@ -1,4 +1,6 @@
 # 轮 43 · F2 自检：取数失败与断言失败分离
+# 轮 46 · M3-04#1 判据改为「全片平均 ≤10% + 单秒 ≤2×」（docs/21 §2），
+#        反向护栏随之换成新判据的两条，并新增「平均口径不许用逐秒再平均」护栏。
 #
 # 判据（轮 43 指令 §3 #2）：人为造一次 recorder 不启动 → 输出应是 1 条 SKIP 而非 10 条 FAIL。
 # 红证据（自然复现，非构造）：verify/artifacts/format-20261110-183428/summary.json
@@ -11,8 +13,9 @@
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $case = Join-Path $PSScriptRoot 'g5_format.ps1'
-# 轮 44：本轮护栏的原始输出落 V1-013 的 artifacts（沿用 V1-008 的文件域会造成跨域写）。
-$art = Join-Path $root 'tasks/G6/V1-013/artifacts'
+$lib = Join-Path $PSScriptRoot '..\lib\CbrCriteria.ps1'
+# 轮 46：本轮护栏的原始输出落 V1-019 自己的 artifacts（不写其它卡的目录）。
+$art = Join-Path $root 'tasks/G6/V1-019/artifacts'
 if (-not (Test-Path $art)) { New-Item -ItemType Directory -Force -Path $art | Out-Null }
 
 $script:pass = 0; $script:fail = 0
@@ -65,20 +68,24 @@ Assert 'f2-missing-fields-skip' ($r3.Skip -eq 1 -and $r3.Fail -eq 0 -and $r3.Rc 
 Assert 'f2-missing-fields-reason' ($r3.Out -match 'record_exit 字段缺失|stdout 为空') `
     ('文案指出具体缺失字段，而不是把空串当 0 去算：' + $r3.SkipText)
 
-Write-Host '--- F2 ④ 判据未被改软（改尺子检测）---'
+Write-Host '--- F2 ④ 判据未被改软（改尺子检测）：新判据 + 共用实现 + VBR 原判据 ---'
 $text = [System.IO.File]::ReadAllText($case, [System.Text.Encoding]::UTF8)
+$libText = if (Test-Path $lib) { [System.IO.File]::ReadAllText($lib, [System.Text.Encoding]::UTF8) } else { '' }
 $guards = @(
-    # 轮 44：逐秒 spread 断言被裁定替换成 5 秒滑窗 spread，但判据数字仍是 -le 0.10。
-    @{ Name = 'f2-threshold-spread-10pct'; Pattern = '\$w\.spread -le 0\.10' },
-    @{ Name = 'f2-threshold-nominal-20pct'; Pattern = 'cbrStats\.deviation -le 0\.20' },
-    @{ Name = 'f2-threshold-vbr-peak-102pct'; Pattern = 'CapKbps \* 1\.02' },
-    @{ Name = 'f2-threshold-vbr-nominal-20pct'; Pattern = 'vbrStats\.deviation -le 0\.20' },
-    @{ Name = 'f2-threshold-60fps-rate'; Pattern = '\$enc60 -ge 58\.0' },
-    @{ Name = 'f2-spread-formula-unchanged'; Pattern = '\$result\.spread = \(\$result\.max - \$result\.min\) / \$result\.avg' },
-    @{ Name = 'f2-bucket-formula-unchanged'; Pattern = 'buckets\[\$second\] \+= \$size' }
+    # docs/21 §2：全片平均偏差 ≤10%（共用实现里只有一个 0.10 阈值）。
+    @{ Name = 'f2-threshold-average-10pct'; Pattern = 'deviation -le 0\.10'; Source = 'lib' },
+    # docs/21 §4：单秒 2× 硬挡板不可放宽。
+    @{ Name = 'f2-threshold-cap-2x'; Pattern = '2 \* \$NominalKbps'; Source = 'lib' },
+    @{ Name = 'f2-threshold-vbr-peak-102pct'; Pattern = 'CapKbps \* 1\.02'; Source = 'case' },
+    @{ Name = 'f2-threshold-vbr-nominal-20pct'; Pattern = 'vbrStats\.deviation -le 0\.20'; Source = 'case' },
+    @{ Name = 'f2-threshold-60fps-rate'; Pattern = '\$enc60 -ge 58\.0'; Source = 'case' },
+    # docs/21 §4 #2：平均口径写死全片 bytes_written/wall_seconds，不许逐秒再平均。
+    @{ Name = 'f2-average-source-wholefile'; Pattern = 'Field \$outCbr ''bytes_written'''; Source = 'case' },
+    @{ Name = 'f2-bucket-formula-unchanged'; Pattern = 'buckets\[\$second\] \+= \$size'; Source = 'lib' }
 )
 foreach ($g in $guards) {
-    Assert $g.Name ($text -match $g.Pattern) ("用例文本仍含判据/口径：{0}" -f $g.Pattern)
+    $src = if ($g.Source -eq 'lib') { $libText } else { $text }
+    Assert $g.Name ($src -match $g.Pattern) ("判据/口径仍在：{0}（{1}）" -f $g.Pattern, $g.Source)
 }
 
 Write-Host '--- F2 ⑤ 历史红证据在位（自然复现，不是构造）---'
@@ -91,26 +98,49 @@ if (Test-Path $red) {
     Assert 'f2-red-evidence-10-fail' $false "历史现场缺失：$red"
 }
 
-Write-Host '--- 轮 44 反向护栏：滑窗过 10% / 单秒过 2× 各必须判 FAIL（19 条 = 17 + 2）---'
-# 序列 1：10 个 6000 桶 + 10 个 5000 桶 → 5 秒滑窗从 6000 滑到 5000，spread 18.2% > 10%；
-#         单秒峰值 6000 ≤ 12000（2× 标称），所以**只有**滑窗断言该 FAIL。
-$sWindow = (@(6000) * 10 + @(5000) * 10) -join ','
-$r4 = Invoke-Case -Tag 'r44-window-spread-fail' -CaseArgs @('-SimulateCbrRates', $sWindow)
-Assert 'r44-window-spread-fail' ($r4.Fail -eq 1 -and $r4.Rc -eq 1 -and
-        $r4.Out -match 'FAIL cbr-window5-spread' -and
+Write-Host '--- 轮 46 反向护栏 ①：全片平均超 10% 必须 FAIL（单秒仍 PASS）---'
+# 20 个 6000 桶：逐秒峰值 6000 ≤ 12000；但全片 35,000,000 B / 40 s = 7,000kbps，
+# 偏差 16.7% > 10% → 只有 cbr-average-deviation 该 FAIL。
+$sAvg = (@(6000) * 20) -join ','
+$r4 = Invoke-Case -Tag 'r46-average-deviation-fail' -CaseArgs @(
+    '-SimulateCbrRates', $sAvg, '-SimulateCbrBytes', '35000000', '-SimulateCbrSecs', '40')
+Assert 'r46-average-deviation-fail' ($r4.Fail -eq 1 -and $r4.Rc -eq 1 -and
+        $r4.Out -match 'FAIL cbr-average-deviation' -and
         $r4.Out -match 'PASS cbr-single-second-cap' -and $r4.Skip -eq 0) `
-    ("滑窗过 10% → FAIL 且退出码 1，不藏成 SKIP：FAIL={0} SKIP={1} rc={2}；{3}" -f `
+    ("平均 16.7% 超 10% → FAIL 且退出码 1：FAIL={0} SKIP={1} rc={2}；{3}" -f `
      $r4.Fail, $r4.Skip, $r4.Rc, $r4.Result)
-# 序列 2：9 桶，第 5 桶 16699kbps（轮 43 真实失控值 2.8×）。9 桶共 5 个滑窗，
-#         每个窗口都含该尖峰 → 窗口值全等 8140kbps、spread 0.0% PASS；
-#         但单秒 16699 > 12000 → **只有**硬挡板该 FAIL。这条专门证明「滑窗不许稀释 IDR 失控」。
+
+Write-Host '--- 轮 46 反向护栏 ②：单秒超 2× 必须 FAIL（平均仍 PASS）---'
+# 第 5 桶 16,699kbps（轮 43 真实失控值 2.8×）；全片 30,000,000 B / 40 s = 6,000kbps
+# 偏差 0.0% → 只有硬挡板该 FAIL。证明「平均通过也不稀释单秒失控」。
 $sCap = (@(6000) * 4 + @(16699) + @(6000) * 4) -join ','
-$r5 = Invoke-Case -Tag 'r44-single-second-cap-fail' -CaseArgs @('-SimulateCbrRates', $sCap)
-Assert 'r44-single-second-cap-fail' ($r5.Fail -eq 1 -and $r5.Rc -eq 1 -and
+$r5 = Invoke-Case -Tag 'r46-single-second-cap-fail' -CaseArgs @(
+    '-SimulateCbrRates', $sCap, '-SimulateCbrBytes', '30000000', '-SimulateCbrSecs', '40')
+Assert 'r46-single-second-cap-fail' ($r5.Fail -eq 1 -and $r5.Rc -eq 1 -and
         $r5.Out -match 'FAIL cbr-single-second-cap' -and
-        $r5.Out -match 'PASS cbr-window5-spread' -and $r5.Skip -eq 0) `
-    ("单秒 16,699kbps 超 2× 但滑窗 0.0% → 硬挡板仍 FAIL：FAIL={0} SKIP={1} rc={2}；{3}" -f `
+        $r5.Out -match 'PASS cbr-average-deviation' -and $r5.Skip -eq 0) `
+    ("单秒 16,699kbps 超 2× 但全片平均 0.0% → 硬挡板仍 FAIL：FAIL={0} SKIP={1} rc={2}；{3}" -f `
      $r5.Fail, $r5.Skip, $r5.Rc, $r5.Result)
+
+Write-Host '--- 轮 46 反向护栏 ③：平均口径不许用「逐秒再平均」代替 ---'
+# 20 个 9000 桶：逐秒均值 9000kbps（+50%），若实现拿它当平均判据就会 FAIL；
+# 全片 30,000,000 B / 40 s = 6,000kbps 偏差 0.0% → 正确实现必须 PASS。
+$sSrc = (@(9000) * 20) -join ','
+$r6 = Invoke-Case -Tag 'r46-average-source-wholefile' -CaseArgs @(
+    '-SimulateCbrRates', $sSrc, '-SimulateCbrBytes', '30000000', '-SimulateCbrSecs', '40')
+Assert 'r46-average-source-wholefile' ($r6.Fail -eq 0 -and $r6.Rc -eq 0 -and
+        $r6.Out -match 'PASS cbr-average-deviation' -and
+        $r6.Out -match 'bytes_written=30000000') `
+    ("逐秒均值 9000 但全片 6000 → 平均判据仍 PASS（口径来自 bytes_written/wall_seconds）：FAIL={0} rc={1}；{2}" -f `
+     $r6.Fail, $r6.Rc, $r6.Result)
+
+Write-Host '--- 轮 46 反向护栏 ④：两条新断言在位、旧的 5 秒滑窗断言已删 ---'
+Assert 'r46-two-new-assertions-present' ($text -match "Assert 'cbr-average-deviation'" -and
+        $text -match "Assert 'cbr-single-second-cap'") `
+    '用例文本含 cbr-average-deviation / cbr-single-second-cap 两条独立断言'
+Assert 'r46-window5-criterion-removed' ($text -notmatch "Assert 'cbr-window5-spread'" -and
+        $text -notmatch 'Get-Window5Stats') `
+    '旧的滑窗判据函数/断言已删除（逐秒与滑窗方差不作判据，docs/21 §2）'
 
 Write-Host ''
 Write-Host ("RESULT: {0} PASS / {1} FAIL" -f $script:pass, $script:fail)
