@@ -1,39 +1,33 @@
 # 轮 33 · M3-03（帧率）与 M3-04（CBR / VBR）的引擎级核验。
+# 轮 46 · M3-04#1 判据按 `docs/21 §2` 改为「全片平均 + 单秒峰值」，逐秒/滑窗方差不作判据。
 #
 # 判据：
 #   M3-03#1  60fps 录制：encode_fps ≥ 58，帧数 ≈ 60×时长
 #   M3-03#2  15fps 录制：encode_fps ≤ 15.5，帧数不超过配置值
-#   M3-04#1  CBR 6000kbps（轮 44 新判据，docs/01 变更记录 43 行）：
-#            cbr-window5-spread     5 秒滑窗平均码率 (max-min)/avg ≤ 10%
-#            cbr-single-second-cap  任意单秒 ≤ 2 × 标称（12000kbps）硬挡板
-#            m3-04-cbr-nominal       avg 偏差 ≤ 20%（未改）
-#   M3-04#2  VBR 6000/9000：avg 偏差 ≤ 20%，逐秒峰值 ≤ 上限
-#   M3-04    「互不覆盖」：VBR 之后再跑 CBR，CBR 仍逐秒恒定（模式不粘滞）
+#   M3-04#1  CBR 6000kbps（docs/21 §2 裁定，docs/01 变更记录 46 行）：
+#            cbr-average-deviation    全片 bytes_written/wall_seconds 与标称偏差 ≤ 10%
+#            cbr-single-second-cap    任意单秒 ≤ 2 × 标称（12000kbps）硬挡板
+#   M3-04#2  VBR 6000/9000：avg 偏差 ≤ 20%，逐秒峰值 ≤ 上限（未改）
+#   M3-04    「互不覆盖」：VBR 之后再跑 CBR，模式与 CBR 判据都不粘滞
 #
-# ===== 滑窗口径（轮 44 指令 §3 #2：必须写清，否则下一个人会按另一种滑法重算）=====
-# 1. 桶怎么分：完全沿用 Get-PerSecondStats —— ffprobe `-select_streams v:0` 的
-#    `packet.pts_time` 按 [int][Math]::Floor() 落整秒桶，桶内累加 packet.size（字节）；
-#    跳过第 0 秒桶与最后一个桶（编码器预热/收尾）；每桶换算 bytes*8/1000 → kbps。
-#    有效桶序列按秒号升序，记为 rates[0..N-1]。
-# 2. 窗口怎么滑：连续 5 个有效桶为一个窗口，**逐秒滑 1 桶**（不是 5 秒一跳）：
-#    第 1 窗 = rates[0..4]，第 2 窗 = rates[1..5]，…直到右端到达 rates[N-1]。
-#    共 max(0, N-5+1) 个窗口；N < 5 时窗口数 = 0 → 滑窗断言判 FAIL（不判 SKIP）。
-# 3. 窗口值：窗内 5 桶的**算术平均码率**（等价于 5 桶字节总和 / 5 秒），
-#    不是窗内单秒最大/最小，也不是重新按 5 秒时间跨度分桶。
-# 4. 波动公式：对窗口值序列取 spread = (max - min) / avg，判 ≤ 0.10。
-#    沿用轮 32 的 spread 定义，只把「逐秒序列」换成「5 秒滑窗平均序列」。
-# 5. 单秒硬挡板：对**全部有效秒桶**（含未落入任何完整窗口的尾部桶）逐个判
-#    rate ≤ 2 × NominalKbps（6000 → 12000）。任一超标立即 FAIL，输出 max 与上限。
-#    **不得**因为滑窗 PASS 而跳过此判定（轮 44 指令 §3 #3：滑窗不许稀释 IDR 失控）。
-# 6. 两条断言各自独立输出，互不短路。判据数字 10% / 2× 来自验收方裁定，一个都不动。
+# ===== CBR 口径（docs/21 §4；实现只在 verify/lib/CbrCriteria.ps1，两个用例共用）=====
+# 1. 分桶：ffprobe `-select_streams v:0` 的 `packet.pts_time` 按 Floor 落整秒桶，
+#    桶内累加 packet.size；跳过第 0 秒桶与最后一个桶；每桶 bytes*8/1000 → kbps。
+# 2. 平均口径写死：**全片** `bytes_written / wall_seconds`（recorder stdout 字段），
+#    与 `标称 kbps × 1000 / 8` 相比，**不允许**用「逐秒再平均」代替。
+# 3. 单秒 2× 硬挡板：对全部有效桶逐个判，任一超标 FAIL；平均 PASS 也不许跳过。
+# 4. 逐秒方差与滑窗方差受编码器实现限制，**不作判据**（docs/21 §2）。
+# 5. 两条断言各自独立输出，互不短路。激励源（ActiveDesktop.ps1）默认参数，不调弱。
 #
 # VBR 的码率判据只在**能填满预算的运动画面**上有意义：静态桌面的 VBR 会显著低于
 # 均值（实测 3,037kbps / 49%），这是 VBR 的正常行为，不是通过项。本用例启动
 # ffplay 全屏 testsrc2 作为运动源，测试结束即关闭。
 #
-# Usage: pwsh -File verify/cases/g5_format.ps1 [-Seconds 15] [-VbrSeconds 20]
-# 反向护栏注入（V1-013）：-SimulateCbrRates '6000,6000,...' —— 不启动 recorder/ffplay，
-#   只跑上面两条 CBR 新断言。判据阈值不因模拟开关改变。
+# Usage: pwsh -File verify/cases/g5_format.ps1 [-Seconds 15] [-VbrSeconds 20] [-CbrScene active]
+# 反向护栏注入：-SimulateCbrRates '6000,...' [-SimulateCbrBytes N] [-SimulateCbrSecs S]
+#   —— 不启动 recorder/ffplay，只跑上面两条 CBR 断言；判据阈值不因模拟开关改变。
+# 同场景对照（F3）：-CbrOnly -CbrFile <mkv> -CbrStdout <recorder .out>
+#   —— 不录制，直接用共用实现分析已有成片，输出 cbr-verdict.json 与两条断言。
 
 param(
     [string]$BuildDir = 'build-msvc',
@@ -45,14 +39,25 @@ param(
     [switch]$SimulateNoStart,
     [switch]$SimulateProductFailure,
     [switch]$SimulateMissingFields,
-    # 轮 44：反向护栏的伪造逐秒序列（csv，单位 kbps）；空 = 正常录制。
-    [string]$SimulateCbrRates = ''
+    # 反向护栏的伪造逐秒序列（csv，单位 kbps）；空 = 正常录制。
+    [string]$SimulateCbrRates = '',
+    # 轮 46：伪造 recorder 的全片取数（平均判据的唯一输入），仅模拟路径可读。
+    [long]$SimulateCbrBytes = 0,
+    [double]$SimulateCbrSecs = 40,
+    # CBR 段激励场景：static（默认，安静桌面）/ active（ActiveDesktop.ps1 默认参数）。
+    [ValidateSet('static', 'active')][string]$CbrScene = 'static',
+    # F3 同场景对照：不录制，直接分析已有成片 + recorder stdout。
+    [string]$CbrFile = '',
+    [string]$CbrStdout = '',
+    [switch]$CbrOnly
 )
 
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot '..\lib\Cleanup.ps1')
 . (Join-Path $PSScriptRoot '..\lib\Forensics.ps1')
+# 轮 46 F3：CBR 分桶 / 判据 / 激励源的唯一实现，与 g5_cbr_probe.ps1 共用。
+. (Join-Path $PSScriptRoot '..\lib\CbrCriteria.ps1')
 trap {
     [void](Save-FailureContext -Tag 'g5_format' -WorkDirs $script:SrForensicsWorkDirs -Note $_)
     Clear-SrProcesses -IncludeNameFallback
@@ -224,28 +229,12 @@ function Record-Segment {
     return (New-SegmentResult -Check $check -Stdout $stdout -Attempts $attempts)
 }
 
-# 逐秒码率：按视频包 pts_time 分桶，跳过首尾各 1s（编码器预热/收尾）。
+# 逐秒派生量（VBR 段使用）：分桶由共用库 Get-CbrSecondBuckets 完成，
+# 这里只保留 VBR 原有的 deviation / peak_ok / spread，不改变任何 VBR 判据。
 function Get-PerSecondStats {
     param([string]$Path, [double]$NominalKbps, [double]$CapKbps = 0)
-    $packets = & $ffprobe -v error -select_streams v:0 -show_entries packet=pts_time,size -of csv=p=0 $Path 2>&1
-    $buckets = @{}
-    foreach ($line in @($packets)) {
-        $parts = ($line -split ',')
-        if ($parts.Count -lt 2) { continue }
-        $time = 0.0
-        $size = 0
-        if (-not [double]::TryParse($parts[0], [ref]$time)) { continue }
-        if (-not [int]::TryParse($parts[1], [ref]$size)) { continue }
-        $second = [int][Math]::Floor($time)
-        if (-not $buckets.ContainsKey($second)) { $buckets[$second] = 0 }
-        $buckets[$second] += $size
-    }
-    $rates = @()
-    $last = if ($buckets.Count -gt 0) { ($buckets.Keys | Measure-Object -Maximum).Maximum } else { 0 }
-    foreach ($key in ($buckets.Keys | Sort-Object)) {
-        if ($key -eq 0 -or $key -ge ($last - 0)) { continue }
-        $rates += ($buckets[$key] * 8 / 1000.0)
-    }
+    $bucketed = Get-CbrSecondBuckets -Ffprobe $ffprobe -Path $Path
+    $rates = @($bucketed.rates)
     $result = [pscustomobject]@{
         count = $rates.Count
         avg = 0.0; max = 0.0; min = 0.0; spread = 1.0
@@ -259,51 +248,26 @@ function Get-PerSecondStats {
             $result.spread = ($result.max - $result.min) / $result.avg
             $result.deviation = [Math]::Abs($result.avg - $NominalKbps) / $NominalKbps
         }
-        # 峰值不超上限：留 2% 的容器/取整余量。
+        # 峰值不超上限：留 2% 的容器/取整余量（VBR 原判据，未改）。
         $result.peak_ok = ($CapKbps -le 0) -or ($result.max -le $CapKbps * 1.02)
     }
     return $result
 }
 
-# 轮 44：5 秒滑窗统计。口径见文件头「滑窗口径」§1~§5，此处只做算术。
-# 输入是 Get-PerSecondStats 产出的有效秒桶序列（已跳首尾桶，单位 kbps）。
-function Get-Window5Stats {
-    param([double[]]$Rates, [int]$WindowSize = 5)
-    $windows = @()
-    for ($i = 0; $i + $WindowSize -le $Rates.Count; $i++) {
-        $sum = 0.0
-        for ($j = 0; $j -lt $WindowSize; $j++) { $sum += $Rates[$i + $j] }
-        # 逐秒滑 1 桶；窗口值 = 5 桶算术平均（等价 5 秒总字节 / 5 秒）。
-        $windows += ($sum / $WindowSize)
-    }
-    $result = [pscustomobject]@{
-        count = $windows.Count
-        avg = 0.0; max = 0.0; min = 0.0; spread = 1.0; rates = $windows
-    }
-    if ($windows.Count -gt 0) {
-        $result.avg = ($windows | Measure-Object -Average).Average
-        $result.max = ($windows | Measure-Object -Maximum).Maximum
-        $result.min = ($windows | Measure-Object -Minimum).Minimum
-        if ($result.avg -gt 0) {
-            $result.spread = ($result.max - $result.min) / $result.avg
-        }
-    }
-    return $result
-}
-
-# 轮 44 新判据的两条独立断言。正常录制与 -SimulateCbrRates 注入共用同一份实现，
-# 保证护栏验的就是真实判据（不是另一套复制品）。
-function Assert-CbrWindow {
-    param([object]$Stats, [double]$NominalKbps)
-    $w = Get-Window5Stats -Rates @($Stats.rates) -WindowSize 5
-    Assert 'cbr-window5-spread' ($w.count -gt 0 -and $w.spread -le 0.10) `
-        ("5s 滑窗（逐秒滑 1 桶，共 {0} 窗）{1:N0}~{2:N0}kbps avg={3:N0} spread={4:P1}（判据 ≤10%）" -f `
-         $w.count, $w.min, $w.max, $w.avg, $w.spread)
-    $cap = 2 * $NominalKbps
-    Assert 'cbr-single-second-cap' ($Stats.count -gt 0 -and $Stats.max -le $cap) `
-        ("单秒峰值 {0:N0}kbps vs 硬上限 {1:N0}kbps（2× 标称 {2:N0}；有效桶 {3} 个，滑窗 PASS 也不稀释）" -f `
-         $Stats.max, $cap, $NominalKbps, $Stats.count)
-    return $w
+# 轮 46 新判据的两条独立断言。正常录制、模拟注入、-CbrOnly 对照共用同一份实现
+# （Get-CbrVerdict 在 verify/lib/CbrCriteria.ps1），保证护栏验的就是真实判据。
+function Assert-CbrCriteria {
+    param([object]$Stats, [long]$BytesWritten, [double]$WallSeconds, [double]$NominalKbps = 6000)
+    $v = Get-CbrVerdict -Rates @($Stats.rates) -BytesWritten $BytesWritten `
+        -WallSeconds $WallSeconds -NominalKbps $NominalKbps
+    $avgDetail = ("全片平均 {0:N0}kbps vs 标称 {1:N0}kbps，偏差 {2:P1}（判据 ≤10%）；bytes_written={3} / wall_seconds={4}，非逐秒再平均（逐秒均值 {5:N0}kbps 仅作对照）" -f `
+        $v.whole_avg_kbps, $v.nominal_kbps, $v.avg_deviation, $v.bytes_written,
+        $v.wall_seconds, $v.rates_avg_kbps)
+    Assert 'cbr-average-deviation' ($v.avg_ok) $avgDetail
+    $capDetail = ("单秒峰值 {0:N0}kbps vs 硬上限 {1:N0}kbps（2× 标称 {2:N0}；有效桶 {3} 个，平均 PASS 也不稀释）" -f `
+        $v.max_kbps, $v.cap_kbps, $NominalKbps, $v.buckets)
+    Assert 'cbr-single-second-cap' ($v.cap_ok) $capDetail
+    return $v
 }
 
 function Start-MotionSource {
@@ -321,13 +285,39 @@ function Stop-MotionSource {
     }
 }
 
-# 模拟分支不启动 recorder，也不清理进程（避免仿真用例误杀同机正在录制的其它用例）。
-if (-not ($SimulateNoStart -or $SimulateProductFailure -or $SimulateMissingFields -or $SimulateCbrRates)) {
+# 模拟 / 同场景对照分支不启动 recorder，也不清理进程（避免误杀同机正在录制的其它用例）。
+if (-not ($SimulateNoStart -or $SimulateProductFailure -or $SimulateMissingFields -or
+          $SimulateCbrRates -or $CbrOnly)) {
     Get-Process sr-ui, sr-recorder -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
-# 轮 44 反向护栏注入：不录、不启 ffplay，直接用伪造逐秒序列跑真实的两条新断言。
-# 判据阈值（0.10 / 2×）与正常路径共用 Assert-CbrWindow，模拟开关不能改尺子。
+# F3 同场景对照（轮 46）：不录制，直接分析 g5_cbr_probe 产出的 active 成片与 recorder stdout。
+# 两个工具走同一份分桶 / 判据实现，输出 cbr-verdict.json 供逐字段比对（差 ≤2%）。
+if ($CbrOnly) {
+    if (-not (Test-Path $CbrFile)) { Write-Host "FAIL: missing CbrFile $CbrFile"; exit 2 }
+    if (-not (Test-Path $CbrStdout)) { Write-Host "FAIL: missing CbrStdout $CbrStdout"; exit 2 }
+    $refOut = Read-TextSafe $CbrStdout
+    $refBytes = [long](Field $refOut 'bytes_written')
+    $refWall = [double](Field $refOut 'wall_seconds')
+    if ($refBytes -le 0 -or $refWall -le 0) {
+        Write-Host 'FAIL: CbrStdout 缺 bytes_written / wall_seconds（平均判据的唯一输入）'; exit 2
+    }
+    $refStats = Get-PerSecondStats -Path $CbrFile -NominalKbps 6000
+    $refVerdict = Assert-CbrCriteria -Stats $refStats -BytesWritten $refBytes `
+        -WallSeconds $refWall -NominalKbps 6000
+    $verdictPath = Join-Path $work 'cbr-verdict.json'
+    [System.IO.File]::WriteAllText($verdictPath,
+        ($refVerdict | ConvertTo-Json -Depth 4), [System.Text.UTF8Encoding]::new($false))
+    Write-Host ("CBR_VERDICT " + $verdictPath)
+    Write-Host ''
+    Write-Host ("RESULT: {0} PASS / {1} FAIL / {2} SKIP ; 产物 {3}" -f $script:pass, $script:fail, $script:skip, $work)
+    if ($script:fail -gt 0) { exit 1 }
+    exit 0
+}
+
+# 轮 46 反向护栏注入：不录、不启 ffplay，直接用伪造逐秒序列 + 伪造全片取数
+# 跑真实的两条新断言。判据阈值（0.10 / 2×）与正常路径共用 Assert-CbrCriteria，
+# 模拟开关不能改尺子。
 if ($SimulateCbrRates) {
     $simRates = @($SimulateCbrRates -split ',' | ForEach-Object {
         $v = 0.0
@@ -341,10 +331,15 @@ if ($SimulateCbrRates) {
         spread = 1.0; deviation = 1.0; peak_ok = $false; rates = $simRates
         simulated = $true
     }
-    Write-Host ("=== 轮 44 反向护栏注入：{0} 个有效秒桶，逐秒 {1:N0}~{2:N0}kbps ===" -f `
-        $simStats.count, $simStats.min, $simStats.max)
-    $null = Assert-CbrWindow -Stats $simStats -NominalKbps 6000
-    Write-Summary -Extra @{ simulated_cbr_rates = $SimulateCbrRates }
+    # 未显式注入全片取数时，按标称 6000kbps × SimulateCbrSecs 造一个「平均恰好达标」的基线。
+    $simBytes = if ($SimulateCbrBytes -gt 0) { $SimulateCbrBytes } `
+        else { [long](6000 * 1000 / 8 * $SimulateCbrSecs) }
+    Write-Host ("=== 轮 46 反向护栏注入：{0} 个有效秒桶，逐秒 {1:N0}~{2:N0}kbps；bytes_written={3} / wall={4}s ===" -f `
+        $simStats.count, $simStats.min, $simStats.max, $simBytes, $SimulateCbrSecs)
+    $null = Assert-CbrCriteria -Stats $simStats -BytesWritten $simBytes `
+        -WallSeconds $SimulateCbrSecs -NominalKbps 6000
+    Write-Summary -Extra @{ simulated_cbr_rates = $SimulateCbrRates
+        simulated_bytes_written = $simBytes; simulated_wall_seconds = $SimulateCbrSecs }
     Write-Host ''
     Write-Host ("RESULT: {0} PASS / {1} FAIL / {2} SKIP ; 产物 {3}" -f $script:pass, $script:fail, $script:skip, $work)
     if ($script:fail -gt 0) { exit 1 }
@@ -376,22 +371,36 @@ Assert 'm3-03-15fps-cap' ($enc15 -le 15.5) ("encode_fps={0} frames={1}" -f $enc1
 Assert 'm3-03-15fps-frames' ($frames15 -le [int]([Math]::Ceiling(15 * $wall15) + 2)) `
     ("frames={0} (上限 {1})" -f $frames15, [int]([Math]::Ceiling(15 * $wall15) + 2))
 
-# ---- M3-04#1 CBR 新判据（轮 44）：5 秒滑窗 ≤10% + 单秒 ≤2× 标称 ----
-Write-Host '=== M3-04#1 CBR 6000kbps × 40s：5s 滑窗 + 单秒 2× 硬挡板 ==='
+# ---- M3-04#1 CBR 新判据（轮 46 / docs/21 §2）：全片平均 ≤10% + 单秒 ≤2× 标称 ----
+Write-Host ("=== M3-04#1 CBR 6000kbps × 40s：全片平均 + 单秒 2× 硬挡板（场景 {0}）===" -f $CbrScene)
 $fileCbr = Join-Path $work 'cbr.mkv'
-$segCbr = Record-Segment -Path $fileCbr -Tag 'cbr' -Fps 30 -BitrateKbps 6000 -Secs 40
+$cbrActivity = $null
+try {
+    if ($CbrScene -eq 'active') {
+        # 共用激励源：ActiveDesktop.ps1 默认参数，不调弱（轮 46 指令 §注意事项 #2）。
+        $cbrActivity = Start-CbrActiveDesktop -Root $root
+    }
+    $segCbr = Record-Segment -Path $fileCbr -Tag 'cbr' -Fps 30 -BitrateKbps 6000 -Secs 40
+} finally {
+    if ($cbrActivity) { Stop-CbrActiveDesktop -Process $cbrActivity }
+}
 Confirm-Segment -Tag 'cbr' -Segment $segCbr
 $outCbr = $segCbr.Stdout
 # M3-04 修复：码控必须真的落到 ICodecAPI（rate_control=cbr），而不是只设 MF_MT_AVG_BITRATE。
 $rateMode = Field $outCbr 'rate_control'
 $fillerBytes = [long](Field $outCbr 'cbr_filler_bytes')
 Assert 'm3-04-cbr-mode' ($rateMode -eq 'cbr') ("rate_control=$rateMode cbr_filler_bytes=$fillerBytes")
+# 全片平均的唯一输入：recorder stdout 的 bytes_written / wall_seconds。
+$bytesCbr = [long](Field $outCbr 'bytes_written')
+$wallCbr = [double](Field $outCbr 'wall_seconds')
 $cbrStats = Get-PerSecondStats -Path $fileCbr -NominalKbps 6000
-# 逐秒 spread 断言（轮 32 自取口径）已由验收方轮 43 裁定替换；口径见文件头「滑窗口径」。
-# 两条断言各自独立输出，单秒 2× 是硬挡板，不因滑窗 PASS 而跳过。
-$cbrWindow = Assert-CbrWindow -Stats $cbrStats -NominalKbps 6000
-Assert 'm3-04-cbr-nominal' ($cbrStats.deviation -le 0.20) `
-    ("avg={0:N0}kbps vs 标称 6000kbps（判据 ≤20%）" -f $cbrStats.avg)
+# 两条断言各自独立输出；单秒 2× 是硬挡板，不因平均 PASS 而跳过。
+$cbrVerdict = Assert-CbrCriteria -Stats $cbrStats -BytesWritten $bytesCbr `
+    -WallSeconds $wallCbr -NominalKbps 6000
+Assert 'cbr-average-source-wholefile' ($cbrVerdict.source -eq 'bytes_written/wall_seconds' -and
+        $bytesCbr -gt 0 -and $wallCbr -gt 0) `
+    ("全片平均取自 bytes_written={0} / wall_seconds={1}；逐秒均值 {2:N0}kbps 不参与判据" -f `
+     $bytesCbr, $wallCbr, $cbrStats.avg)
 
 # ---- M3-04#2 VBR：峰值约束，均值 ±20% ----
 Write-Host ("=== M3-04#2 VBR 6000/9000kbps × {0}s（全屏运动源）===" -f $VbrSeconds)
@@ -435,11 +444,10 @@ Assert 'm3-04-vbr-static-recorded' ((Test-Path $fileVbrStatic) -and $vbrStaticMo
 Assert 'm3-04-vbr-peak-any-content' ($vbrStats.peak_ok -and $vbrStaticStats.peak_ok) `
     ("② 运动源峰值 {0:N0} / 静态峰值 {1:N0} vs 上限 9000kbps（判据 ≤102%）" -f $vbrStats.max, $vbrStaticStats.max)
 
-# ---- M3-04 互不覆盖：VBR 之后 CBR 仍恒定（同样用轮 44 新判据）----
-# 回归首轮实测：这段还留着旧的「逐秒 spread ≤10%」，VBR 后复跑 CBR 得 13.9% FAIL，
-# 与正式 CBR 段的新口径自相矛盾。同一需求不能两种判据 —— 改为同一套
-# 「5 秒滑窗 ≤10% + 单秒 ≤2× 标称」，判据数字一个不动。
-Write-Host '=== M3-04 互不覆盖：VBR 后复跑 CBR 12s（5s 滑窗 + 2× 挡板）==='
+# ---- M3-04 互不覆盖：VBR 之后 CBR 模式不粘滞，判据与正式 CBR 段同一套 ----
+# 轮 46：正式 CBR 段改用「全片平均 ≤10% + 单秒 ≤2×」，本段必须同步，
+# 否则同一需求在一次用例里出现两种判据。这里直接复用 Get-CbrVerdict，不再单独输出两条断言。
+Write-Host '=== M3-04 互不覆盖：VBR 后复跑 CBR 12s（全片平均 + 单秒 2× 挡板）==='
 $fileCbr2 = Join-Path $work 'cbr_after_vbr.mkv'
 $segCbr2 = Record-Segment -Path $fileCbr2 -Tag 'cbr_after_vbr' -Fps 30 -BitrateKbps 6000 -Secs 12
 Confirm-Segment -Tag 'cbr_after_vbr' -Segment $segCbr2
@@ -447,12 +455,15 @@ $outCbr2 = $segCbr2.Stdout
 $cbr2Mode = Field $outCbr2 'rate_control'
 $cbr2Filler = [long](Field $outCbr2 'cbr_filler_bytes')
 $cbr2Stats = Get-PerSecondStats -Path $fileCbr2 -NominalKbps 6000
-$cbr2Window = Get-Window5Stats -Rates @($cbr2Stats.rates) -WindowSize 5
+$cbr2Bytes = [long](Field $outCbr2 'bytes_written')
+$cbr2Wall = [double](Field $outCbr2 'wall_seconds')
+$cbr2Verdict = Get-CbrVerdict -Rates @($cbr2Stats.rates) -BytesWritten $cbr2Bytes `
+    -WallSeconds $cbr2Wall -NominalKbps 6000
 Assert 'm3-04-mode-isolation' ($cbr2Mode -eq 'cbr' -and $cbr2Filler -gt 0 -and
-        $cbr2Window.count -gt 0 -and $cbr2Window.spread -le 0.10 -and
-        $cbr2Stats.max -le 12000) `
-    ("第二次 CBR：mode={0} filler={1} 5s滑窗spread={2:P1}（≤10%，{3} 窗）单秒峰值={4:N0} vs 12000（2× 硬挡板）" -f `
-     $cbr2Mode, $cbr2Filler, $cbr2Window.spread, $cbr2Window.count, $cbr2Stats.max)
+        $cbr2Verdict.verdict_ok) `
+    ("第二次 CBR：mode={0} filler={1} 全片平均={2:N0}kbps 偏差={3:P1} 单秒峰值={4:N0} vs {5:N0}（2× 硬挡板）" -f `
+     $cbr2Mode, $cbr2Filler, $cbr2Verdict.whole_avg_kbps, $cbr2Verdict.avg_deviation,
+     $cbr2Verdict.max_kbps, $cbr2Verdict.cap_kbps)
 Assert 'm3-04-no-overwrite' ((Test-Path $fileCbr) -and (Test-Path $fileVbr) -and
     (Test-Path $fileVbrStatic) -and (Test-Path $fileCbr2) -and
     ((Get-Item $fileVbr).Length -ne (Get-Item $fileCbr).Length)) `
@@ -463,11 +474,18 @@ $summary = [pscustomobject]@{
     frames_60     = $frames60
     encode_fps_15 = $enc15
     frames_15     = $frames15
-    cbr_avg_kbps  = $cbrStats.avg
-    cbr_spread    = $cbrStats.spread
+    cbr_rates_avg_kbps = $cbrStats.avg
+    cbr_whole_avg_kbps = $cbrVerdict.whole_avg_kbps
+    cbr_avg_deviation  = $cbrVerdict.avg_deviation
+    cbr_avg_ok         = $cbrVerdict.avg_ok
+    cbr_max_kbps       = $cbrVerdict.max_kbps
+    cbr_cap_ok         = $cbrVerdict.cap_ok
+    cbr_scene          = $CbrScene
     cbr_rate_mode = $rateMode
     cbr_filler_bytes = $fillerBytes
     cbr_file_bytes = if (Test-Path $fileCbr) { (Get-Item $fileCbr).Length } else { 0 }
+    cbr_bytes_written = $bytesCbr
+    cbr_wall_seconds  = $wallCbr
     vbr_avg_kbps  = $vbrStats.avg
     vbr_min_kbps  = $vbrStats.min
     vbr_max_kbps  = $vbrStats.max
@@ -479,7 +497,8 @@ $summary = [pscustomobject]@{
     vbr_static_min_kbps = $vbrStaticStats.min
     vbr_static_max_kbps = $vbrStaticStats.max
     vbr_static_mode = $vbrStaticMode
-    cbr2_spread   = $cbr2Stats.spread
+    cbr2_whole_avg_kbps = $cbr2Verdict.whole_avg_kbps
+    cbr2_avg_deviation  = $cbr2Verdict.avg_deviation
     cbr2_mode     = $cbr2Mode
     pass          = $script:pass
     fail          = $script:fail
