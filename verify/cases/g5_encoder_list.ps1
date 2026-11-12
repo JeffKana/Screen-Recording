@@ -216,16 +216,33 @@ if ($settings -ne [IntPtr]::Zero) {
     $listBox = [EncoderListNative]::GetDlgItem($settings, 107)
     Assert 'm3-05-ui-listbox-exists' ($listBox -ne [IntPtr]::Zero) ("列表控件 hwnd={0}" -f $listBox)
     if ($listBox -ne [IntPtr]::Zero) {
-        $uiCount = [int][EncoderListNative]::SendMessage($listBox, [EncoderListNative]::LB_GETCOUNT, [IntPtr]::Zero, [IntPtr]::Zero)
+        # 轮 45（F: g5_encoder_list 竞态）：窗口先创建、列表后填充是常态，
+        # 直接取 LB_GETCOUNT 会偶发读到 0（轮 44 出现过一次 15 PASS / 1 FAIL，
+        # 验收方复跑 17/0 未复现）。这里**只加等待**：≤2s 轮询到条目数就绪再断言，
+        # 判据「UI 条目数 == recorder 列表项数」一个字不改。
+        $uiCount = 0
+        $countDeadline = (Get-Date).AddSeconds(2)
+        while ((Get-Date) -lt $countDeadline) {
+            $uiCount = [int][EncoderListNative]::SendMessage($listBox, [EncoderListNative]::LB_GETCOUNT, [IntPtr]::Zero, [IntPtr]::Zero)
+            if ($uiCount -eq $count) { break }
+            Start-Sleep -Milliseconds 100
+        }
         Assert 'm3-05-ui-listbox-count' ($uiCount -eq $count) `
-            ("UI 列表条目数={0}，recorder 列表项数={1}（期望相等）" -f $uiCount, $count)
+            ("UI 列表条目数={0}，recorder 列表项数={1}（期望相等；已 ≤2s 轮询等控件就绪）" -f $uiCount, $count)
     }
-    $uiLogText = Read-TextShared $uiLog
+    # 同理：UI 的 encoders=[...] / encoder_rows= 是填充后写日志，读一次可能读空。轮询 ≤2s。
+    $uiLogText = ''
     $uiCanonical = ''
     $uiRows = -1
-    foreach ($line in ($uiLogText -split "`r?`n")) {
-        if ($line -match 'encoders=\[(.*)\]') { $uiCanonical = $Matches[1] }
-        elseif ($line -match 'encoder_rows=(\d+)') { $uiRows = [int]$Matches[1] }
+    $logDeadline = (Get-Date).AddSeconds(2)
+    while ((Get-Date) -lt $logDeadline) {
+        $uiLogText = Read-TextShared $uiLog
+        foreach ($line in ($uiLogText -split "`r?`n")) {
+            if ($line -match 'encoders=\[(.*)\]') { $uiCanonical = $Matches[1] }
+            elseif ($line -match 'encoder_rows=(\d+)') { $uiRows = [int]$Matches[1] }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($uiCanonical) -and $uiRows -ge 0) { break }
+        Start-Sleep -Milliseconds 100
     }
     Assert 'm3-05-ui-log-same-line' (-not [string]::IsNullOrWhiteSpace($uiCanonical) -and $uiCanonical -eq $canonical) `
         ("UI 日志行与 recorder 规范单行逐字一致：{0}" -f ($uiCanonical -eq $canonical))
