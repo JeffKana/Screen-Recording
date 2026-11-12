@@ -1,24 +1,24 @@
 # 轮 43 · F1 定性：CBR 逐秒码率过冲（只读测量，不改产品、不改用例如判据）
-# 轮 45 · 按验收方指令 §1/§3「静态与活动两组固化进同一套脚本」，新增 active 场景，
-#        并按轮 44 判据输出 5s 滑窗 + 单秒 2× 两条判定（口径与 g5_format.ps1 完全一致）。
+# 轮 45 · 静态与活动两组固化进同一套脚本。
+# 轮 46 · 判据按 `docs/21 §2` 改为「全片平均 ≤10% + 单秒 ≤2×」；逐秒/滑窗方差不作判据。
+#         与 g5_format.ps1 **共用** `verify/lib/CbrCriteria.ps1` 的激励源、分桶与判据实现（F3）；
+#         active 场景调用 `ActiveDesktop.ps1` 的**默认参数**（-Seconds/-Windowed/-BurstSec 都不传）。
 #
 # 场景：
 #   static = 安静桌面（不做任何 UI 动作）
-#   active = 桌面有活动（`verify/lib/ActiveDesktop.ps1` 满屏滚动小字 + 光标移动）
+#   active = 桌面有活动（ActiveDesktop.ps1 默认参数：满屏滚动小字 + 突发整屏重排 + 光标移动）
 #   motion = 全屏 testsrc2 运动源（轮 43 的历史场景，保留以便纵向对比）
 #
 # 每次运行输出：
 #   - recorder stdout 汇总 + 全量 metrics 行（capture_fps / encode_fps / dropped）
 #   - 逐秒表 persec.csv：second, bytes, kbps, packets, keyframes, max_packet
 #   - 关键帧秒字节分解 nal-*.json：keyframe_bytes / filler_bytes / other_bytes
-#   - 汇总 probe-summary.txt：每次的 win5 spread / 单秒峰值 / 是否两条判据全过
-#
-# 判据口径与 g5_format.ps1::Get-PerSecondStats **完全一致**（按 pts_time 分桶，
-# 跳过第 0 秒与最后一秒）。
+#   - 逐次 summary.json：全片平均/偏差、单秒峰值/2× 挡板、平均超还是单秒超（分开记）
+#   - 汇总 probe-summary.txt：每次两条判据的实测值与 VERDICT
 #
 # Usage:
 #   pwsh -File verify/cases/g5_cbr_probe.ps1 -Seconds 40 -Runs 5 -Mode both
-#   pwsh -File verify/cases/g5_cbr_probe.ps1 -Seconds 40 -Runs 3 -Mode static,active
+#   pwsh -File verify/cases/g5_cbr_probe.ps1 -Seconds 40 -Runs 3 -Mode static,active -OutDir <dir>
 #   pwsh -File verify/cases/g5_cbr_probe.ps1 -Seconds 40 -Runs 5 -Mode static -OutDir <dir>
 
 param(
@@ -33,6 +33,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\lib\Cleanup.ps1')
+# 轮 46 F3：与 g5_format.ps1 共用分桶 / 判据 / 激励源的调用封装。
+. (Join-Path $PSScriptRoot '..\lib\CbrCriteria.ps1')
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $rec = Join-Path $root (Join-Path $BuildDir "bin\$Config\sr-recorder.exe")
 if (-not (Test-Path $rec)) { $rec = Join-Path $root (Join-Path $BuildDir 'bin\sr-recorder.exe') }
@@ -67,42 +69,21 @@ $summary.Add("F1_CBR_PROBE_START $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
 $summary.Add("EXE=$rec")
 $summary.Add("SECONDS=$Seconds RUNS_PER_MODE=$Runs MODE=$Mode")
 
+# 逐秒表：分桶取自共用库（与 g5_format 同一份 ffprobe 取数），这里只写 CSV 与派生量。
 function Get-PerSecond {
     param([string]$Mkv, [string]$CsvOut)
-    $packets = & $ffprobe -v error -select_streams v:0 `
-        -show_entries packet=pts_time,size,flags -of csv=p=0 $Mkv 2>&1
-    $buckets = @{}
-    $counts = @{}
-    $keys = @{}
-    $maxes = @{}
-    foreach ($line in @($packets)) {
-        $a = ($line -split ',')
-        if ($a.Count -lt 2) { continue }
-        $t = 0.0; $s = 0
-        if (-not [double]::TryParse($a[0], [ref]$t)) { continue }
-        if (-not [int]::TryParse($a[1], [ref]$s)) { continue }
-        $sec = [int][Math]::Floor($t)
-        if (-not $buckets.ContainsKey($sec)) {
-            $buckets[$sec] = 0; $counts[$sec] = 0; $keys[$sec] = 0; $maxes[$sec] = 0
-        }
-        $buckets[$sec] += $s
-        $counts[$sec]++
-        if ($a.Count -ge 3 -and $a[2] -match 'K') { $keys[$sec]++ }
-        if ($s -gt $maxes[$sec]) { $maxes[$sec] = $s }
-    }
+    $bucketed = Get-CbrSecondBuckets -Ffprobe $ffprobe -Path $Mkv
     $rows = [System.Collections.Generic.List[string]]::new()
     $rows.Add('second,bytes,kbps,packets,keyframes,max_packet')
-    foreach ($sec in ($buckets.Keys | Sort-Object)) {
-        $rows.Add(("{0},{1},{2:N0},{3},{4},{5}" -f $sec, $buckets[$sec],
-                   ($buckets[$sec] * 8 / 1000.0), $counts[$sec], $keys[$sec], $maxes[$sec]))
+    foreach ($r in @($bucketed.rows)) {
+        $rows.Add(("{0},{1},{2:N0},{3},{4},{5}" -f $r.second, $r.bytes, $r.kbps,
+                   $r.packets, $r.keyframes, $r.max_packet))
     }
     [System.IO.File]::WriteAllText($CsvOut, ($rows -join "`n") + "`n",
         [System.Text.UTF8Encoding]::new($false))
 
-    # 与 g5_format 相同：跳过第 0 秒与最后一秒
-    $last = if ($buckets.Count -gt 0) { ($buckets.Keys | Measure-Object -Maximum).Maximum } else { 0 }
-    $rates = @($buckets.Keys | Sort-Object | Where-Object { $_ -ne 0 -and $_ -lt $last } |
-               ForEach-Object { $buckets[$_] * 8 / 1000.0 })
+    $eff = @($bucketed.effective)
+    $rates = @($bucketed.rates)
     if ($rates.Count -eq 0) {
         return [pscustomobject]@{ count = 0; min = 0; max = 0; avg = 0; spread = 1.0;
                                   worst_second = -1; worst_rate = 0; rates = @() }
@@ -110,31 +91,15 @@ function Get-PerSecond {
     $avg = ($rates | Measure-Object -Average).Average
     $max = ($rates | Measure-Object -Maximum).Maximum
     $min = ($rates | Measure-Object -Minimum).Minimum
-    $worstSec = ($buckets.Keys | Where-Object { $_ -ne 0 -and $_ -lt $last } |
-                 Sort-Object { -$buckets[$_] } | Select-Object -First 1)
+    $worst = ($eff | Sort-Object { -$_.bytes } | Select-Object -First 1)
     return [pscustomobject]@{
         count = $rates.Count; min = $min; max = $max; avg = $avg
+        # 逐秒 spread 只作历史纵向对照，docs/21 §2 明确「不作判据」。
         spread = $(if ($avg -gt 0) { ($max - $min) / $avg } else { 1.0 })
-        worst_second = $worstSec
-        worst_rate = $buckets[$worstSec] * 8 / 1000.0
+        worst_second = [int]$worst.second
+        worst_rate = $worst.bytes * 8 / 1000.0
         rates = $rates
     }
-}
-
-# 轮 45：轮 44 判据的两条口径（与 g5_format.ps1::Get-Window5Stats / Assert-CbrWindow 同源）。
-# 5s 滑窗（逐秒滑 1 桶）平均码率的 (max-min)/avg ≤ 10%；单秒 ≤ 2× 标称。
-function Get-Window5Spread {
-    param([double[]]$Rates, [int]$WindowSize = 5)
-    if ($Rates.Count -lt $WindowSize) { return 1.0 }
-    $windows = @()
-    for ($i = 0; $i + $WindowSize -le $Rates.Count; $i++) {
-        $sum = 0.0
-        for ($j = 0; $j -lt $WindowSize; $j++) { $sum += $Rates[$i + $j] }
-        $windows += ($sum / $WindowSize)
-    }
-    $avg = ($windows | Measure-Object -Average).Average
-    if ($avg -le 0) { return 1.0 }
-    return ((($windows | Measure-Object -Maximum).Maximum - ($windows | Measure-Object -Minimum).Minimum) / $avg)
 }
 
 foreach ($m in $modes) {
@@ -151,11 +116,9 @@ foreach ($m in $modes) {
                 -ArgumentList @('-fs', '-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=30', '-an')
             Start-Sleep -Seconds 3
         } elseif ($m -eq 'active') {
-            # 桌面有活动：满屏滚动小字 + 光标划圆（等价于终端/IDE 在动）。
-            # 时长给足「预热 + 录制 + 余量」，收尾由 finally 统一杀。
-            $activity = Start-Process -FilePath 'pwsh' -PassThru -WindowStyle Hidden `
-                -ArgumentList @('-NoProfile', '-File', "`"$activeDesktopScript`"", '-Seconds', "$($Seconds + 15)")
-            Start-Sleep -Seconds 3
+            # 共用激励源：ActiveDesktop.ps1 **默认参数**（Seconds=120、全屏、BurstSec=2），
+            # 不传 -Seconds / -Windowed / -BurstSec，不调弱（轮 46 指令 §注意事项 #2）。
+            $activity = Start-CbrActiveDesktop -Root $root
         } else {
             # 静态桌面：不做任何 UI 动作，等桌面完全静止（轮 43 指令 §2.4）
             Start-Sleep -Seconds 2
@@ -176,12 +139,8 @@ foreach ($m in $modes) {
         } finally {
             if ($motion) { Stop-Process -Id $motion.Id -Force -ErrorAction SilentlyContinue }
             if ($activity) {
-                Stop-Process -Id $activity.Id -Force -ErrorAction SilentlyContinue
-                # ActiveDesktop 是 pwsh 子进程，再按命令行兜底清一次，避免残留窗口影响下一次 static。
-                Get-CimInstance Win32_Process -Filter "Name='pwsh.exe'" -ErrorAction SilentlyContinue |
-                    Where-Object { $_.CommandLine -like '*ActiveDesktop.ps1*' } |
-                    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-                Start-Sleep -Milliseconds 500
+                # 共用收尾：按 PID + 命令行兜底清 pwsh 子进程，避免残留窗口影响下一次 static。
+                Stop-CbrActiveDesktop -Process $activity
             }
         }
         $stdout = Read-TextSafe $outFile
@@ -197,13 +156,20 @@ foreach ($m in $modes) {
             ($metrics -join "`n") + "`n", [System.Text.UTF8Encoding]::new($false))
 
         $stats = Get-PerSecond -Mkv $mkv -CsvOut (Join-Path $OutDir "$tag.persec.csv")
-        $overTen = $stats.spread -gt 0.10
-        # 轮 44 判据（轮 45 起本脚本按它判，逐秒 spread 仅作历史对照保留）：
-        #   ① 5s 滑窗（逐秒滑 1 桶）≤10%   ② 单秒 ≤ 2× 标称（12000kbps）
-        $win5Spread = if ($stats.count -gt 0) { Get-Window5Spread -Rates @($stats.rates) } else { 1.0 }
-        $win5Ok = ($stats.count -ge 5) -and ($win5Spread -le 0.10)
-        $capOk = ($stats.count -gt 0) -and ($stats.max -le 12000)
-        $verdictOk = $win5Ok -and $capOk
+        # 全片平均的唯一输入：recorder stdout 的 bytes_written / wall_seconds（不许逐秒再平均）。
+        $bytesWritten = if ($stdout -match '(?m)^bytes_written=(\d+)') { [long]$Matches[1] } else { 0 }
+        $wallSeconds = if ($stdout -match '(?m)^wall_seconds=([0-9.]+)') { [double]$Matches[1] } else { 0.0 }
+        # docs/21 §2：全片平均偏差 ≤10% + 单秒 ≤2×；逐秒/滑窗方差不作判据。
+        # 与 g5_format.ps1 共用 Get-CbrVerdict，两个工具不会出现两套结论。
+        $verdict = Get-CbrVerdict -Rates @($stats.rates) -BytesWritten $bytesWritten `
+            -WallSeconds $wallSeconds -NominalKbps 6000
+        $verdictOk = $verdict.verdict_ok
+        # 失败归因必须区分「平均超」与「单秒超」——两者处置不同（轮 46 指令 §注意事项 #3）。
+        $failKind = if ($verdictOk) { '' }
+            elseif (-not $verdict.avg_ok -and -not $verdict.cap_ok) { 'average+single-second' }
+            elseif (-not $verdict.avg_ok) { 'average' }
+            else { 'single-second' }
+        $overTen = $stats.spread -gt 0.10   # 仅历史纵向对照，不参与判定
         $captureFps = ''
         if ($metrics.Count -gt 0) {
             $lastMetric = $metrics[-1]
@@ -224,23 +190,32 @@ foreach ($m in $modes) {
             metric_lines = $metrics.Count
             seconds_counted = $stats.count
             min_kbps = [Math]::Round($stats.min, 0); max_kbps = [Math]::Round($stats.max, 0)
-            avg_kbps = [Math]::Round($stats.avg, 0); spread = [Math]::Round($stats.spread, 4)
-            over_10pct = $overTen; worst_second = $stats.worst_second
+            rates_avg_kbps = [Math]::Round($stats.avg, 0)
+            persecond_spread = [Math]::Round($stats.spread, 4)   # 不作判据
+            over_10pct_historical = $overTen                     # 不作判据
+            worst_second = $stats.worst_second
             worst_kbps = [Math]::Round($stats.worst_rate, 0)
             capture_fps = $captureFps
-            win5_spread = [Math]::Round($win5Spread, 4)
-            win5_ok = $win5Ok; cap_ok = $capOk; verdict_ok = $verdictOk
+            bytes_written = $bytesWritten; wall_seconds = $wallSeconds
+            whole_avg_kbps = [Math]::Round($verdict.whole_avg_kbps, 1)
+            avg_deviation_pct = [Math]::Round($verdict.avg_deviation * 100, 2)
+            avg_ok = $verdict.avg_ok
+            cap_kbps = $verdict.cap_kbps
+            cap_ok = $verdict.cap_ok
+            verdict_ok = $verdictOk
+            fail_kind = $failKind
         }
         [System.IO.File]::WriteAllText((Join-Path $OutDir "$tag.summary.json"),
             ($row | ConvertTo-Json -Depth 3), [System.Text.UTF8Encoding]::new($false))
         $line = ("RUN {0} exit={1}/{2} frames={3} filler={4} metrics={5} cap_fps={6} | " +
-                 "min={7} max={8} avg={9} persecond_spread={10:P1} | " +
-                 "win5={11:P1} win5_ok={12} cap_ok={13} VERDICT={14} worst_sec={15} ({16} kbps)") -f `
+                 "whole_avg={7:N0}kbps avg_dev={8:N2}% avg_ok={9} | " +
+                 "peak={10:N0} vs cap={11:N0} cap_ok={12} VERDICT={13} fail_kind={14} | " +
+                 "persecond_spread={15:P1}(历史对照,不作判据) worst_sec={16} ({17:N0} kbps)") -f `
             $tag, $recordExit, $exitCode, $encoded, $filler, $metrics.Count, $captureFps,
-            [Math]::Round($stats.min, 0), [Math]::Round($stats.max, 0),
-            [Math]::Round($stats.avg, 0), $stats.spread,
-            $win5Spread, $win5Ok, $capOk, $(if ($verdictOk) { 'PASS' } else { 'FAIL' }),
-            $stats.worst_second, [Math]::Round($stats.worst_rate, 0)
+            $verdict.whole_avg_kbps, ($verdict.avg_deviation * 100), $verdict.avg_ok,
+            $verdict.max_kbps, $verdict.cap_kbps, $verdict.cap_ok,
+            $(if ($verdictOk) { 'PASS' } else { 'FAIL' }), $(if ($failKind) { $failKind } else { '-' }),
+            $stats.spread, $stats.worst_second, [Math]::Round($stats.worst_rate, 0)
         $summary.Add($line)
         Write-Host $line
     }
@@ -249,11 +224,16 @@ foreach ($m in $modes) {
 foreach ($m in $modes) {
     $rows = @(Get-ChildItem $OutDir -Filter "$m-*.summary.json" |
               ForEach-Object { Get-Content $_.FullName -Raw -Encoding UTF8 | ConvertFrom-Json })
-    $over = @($rows | Where-Object { $_.over_10pct }).Count
+    $over = @($rows | Where-Object { $_.over_10pct_historical }).Count
     $verdictPass = @($rows | Where-Object { $_.verdict_ok }).Count
-    $summary.Add("MODE $m runs=$($rows.Count) verdict_pass=$verdictPass over_10pct=$over " +
-                 "win5=$(($rows | ForEach-Object { '{0:P1}' -f $_.win5_spread }) -join ',') " +
-                 "peak=$(($rows | ForEach-Object { $_.max_kbps }) -join ',') " +
+    $avgFail = @($rows | Where-Object { -not $_.avg_ok }).Count
+    $capFail = @($rows | Where-Object { -not $_.cap_ok }).Count
+    $summary.Add("MODE $m runs=$($rows.Count) verdict_pass=$verdictPass avg_fail=$avgFail cap_fail=$capFail " +
+                 "persecond_spread_over10_historical=$over " +
+                 "avg_dev_pct=$(($rows | ForEach-Object { $_.avg_deviation_pct }) -join ',') " +
+                 "whole_avg_kbps=$(($rows | ForEach-Object { $_.whole_avg_kbps }) -join ',') " +
+                 "peak_kbps=$(($rows | ForEach-Object { $_.max_kbps }) -join ',') " +
+                 "fail_kind=$(($rows | ForEach-Object { if ($_.fail_kind) { $_.fail_kind } else { '-' } }) -join ',') " +
                  "capture_fps=$(($rows | ForEach-Object { $_.capture_fps }) -join ',')")
 }
 $summary.Add("F1_CBR_PROBE_DONE $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
