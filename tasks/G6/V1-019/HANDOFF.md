@@ -27,6 +27,18 @@
 4. **用例维护者**：以后改 CBR 判据只改 `verify/lib/CbrCriteria.ps1` 一处；
    平均口径写死全片 `bytes_written/wall_seconds`，单秒 2× 挡板不许被平均 PASS 稀释。
 
+## 2.1 交付通道状态（如实记录，非验收结论）
+
+- 分支：`round/46`，从 `main` @ `ad65d7b` 拉出；已 `git push -u origin round/46`。
+- **PR #5**：<https://github.com/JeffKana/Screen-Recording/pull/5>（`base=main`、`head=round/46`），
+  `gh pr create --base main --fill` 创建，随后按 `.github/pull_request_template.md`
+  用 `gh pr edit 5 --body-file ...` 补齐五项（任务卡 / 需求→证据 / 自测原始行 / 未做与挂账 / 风险与回退）。
+- **CI 三项全绿**（`gh pr checks --watch`）：
+  `checks (contract/coverage/cards/domain)` pass 13s、
+  `build (msvc, warnings=0)` pass 58s、`build (mingw, warnings=0)` pass 58s。
+- CI 只跑静态检查与双构建；集成用例（含 6 次实测与 P1 矩阵）由本机重跑，
+  原始 RESULT 行见 `SELFTEST.md §1/§3`，**不因 CI 绿就写成集成验收通过**。
+
 ## 3. 已知限制是什么？
 
 - **ActiveDesktop 默认参数**：`Start-CbrActiveDesktop` 用 `pwsh -NoProfile -File verify/lib/ActiveDesktop.ps1`
