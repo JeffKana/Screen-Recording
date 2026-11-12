@@ -24,17 +24,16 @@
 3. **V1.5 排期**：M3-04#1 需要「应用层 VBV」或「换可做逐帧 QP 的编码器」二选一，
    后者引入三方依赖需 O0 批准（见 `docs/17 §8`）。
 
-## 2.1 交付通道状态（本机环境，如实记录）
+## 2.1 交付通道状态（如实记录）
 
 - 分支已推送：`git push -u origin round/45` 成功（`* [new branch] round/45 -> round/45`）。
-- **PR 未能在本机创建**：`gh pr create` 对 `api.github.com` 的连接超时
-  （`dial tcp 20.205.243.168:443: connectex: ...`，重试 2 次同样失败），
-  `gh pr checks --watch` 因此也无从跑。**这不是代码/CI 问题，是本机出网限制。**
-- 请 O0 用下面任一方式补建 PR（标题与正文已备好，正文见本轮 PR 描述草稿）：
-  - 网页：<https://github.com/JeffKana/Screen-Recording/pull/new/round/45>
-  - CLI（能连 api 的机器上）：`gh pr create --base main --head round/45 --title "round/45 G6 M3-04#1 选项 A 实测（无效，报 PARTIAL）+ 7 条逐条定性 + 用例与矩阵（3 卡）" --body-file <正文>`
-- CI 只跑 `checks / build(msvc) / build(mingw)`（不跑集成用例），三项本地已等价复核：
-  四项静态检查 8/8 + 覆盖 PASS + 卡面 0 冲突 + 文件域 0 mismatch；MSVC/MinGW 均零告警。
+- **PR #2 已创建**：<https://github.com/JeffKana/Screen-Recording/pull/2>（`base=main`、`head=round/45`）。
+  - 过程留痕：首次 `gh pr create` 对 `api.github.com` 连接超时（本机 `git` 走 `http.proxy=127.0.0.1:7897`，
+    而 `gh` 不读 git 的 proxy 配置）；给 `gh` 补 `HTTP(S)_PROXY` 后创建成功、`gh auth status` 正常。
+    **属本机代理配置差异，不是代码/CI 问题。**
+- **CI 三项全绿**（`gh pr checks 2 --watch`）：`checks (contract/coverage/cards/domain)` pass 13s、
+  `build (msvc, warnings=0)` pass 57s、`build (mingw, warnings=0)` pass 1m37s。
+- CI 只跑静态检查与双构建（不跑集成用例），集成用例的原始 RESULT 行见本卡 `SELFTEST.md` §1。
 
 ## 3. 已知限制是什么？
 
