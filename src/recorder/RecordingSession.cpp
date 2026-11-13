@@ -240,6 +240,7 @@ int RecordingSession::Run(const Options& options, Stats& stats, std::string& err
     sr::encode::MfVideoEncoder encoder;
     // M3-05：显式指定编码器时不做回退（不可用 → 下面这条路径退出码 6）。
     encoder.SetRequestedId(options.encoder_id);
+    encoder.SetFailureInjection(options.fail_hardware_encoder, options.fail_software_encoder);
     if (!encoder.Open(config, error)) {
         Log(std::string("encoder open failed: ") + error);
         return 6;

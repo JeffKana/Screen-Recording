@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "core/interfaces/IVideoEncoder.h"
+#include "encode/EncoderList.h"
 #include "platform/ComPtr.h"
 
 #include <mfobjects.h>
@@ -56,8 +57,22 @@ public:
     // M3-05：强制指定编码器（id 见 `sr-recorder --list-encoders`）。
     // 指定后**不做「硬编 → 软编」回退**：用户点名了，不可用/打不开就明确失败并给原因，
     // 走既有的 exit 6 路径（RecordingSession 的「encoder open failed」）。
+    // 轮 47 落地：此前只有「创建」分支守这条，协商/码控失败仍会静默换软编。
     void SetRequestedId(const std::string& id) { requested_id_ = id; }
     const std::string& RequestedId() const { return requested_id_; }
+
+    // 仅 SR_TEST_HOOKS 构建经 CLI 传入：让硬编/软编其中一类的创建失败。
+    void SetFailureInjection(bool fail_hardware, bool fail_software) {
+        fail_hardware_encoder_ = fail_hardware;
+        fail_software_encoder_ = fail_software;
+    }
+
+    // 轮 47 / M3-05#1：列表用的真激活探测。走与录制完全相同的 Open 路径
+    // （创建 MFT → 协商 → 码控），再真的提交 NV12 帧并取回 H.264 包。
+    // 失败时 error 写明阶段；每次调用都用全新实例，不缓存失败状态，可重试。
+    // 不创建 D3D device / video processor：产品编码路径是 CPU NV12，探测器不引入新泄漏面。
+    static bool ProbeAvailable(bool hardware, const EncoderProbeOptions& options,
+                               std::string& error);
 
 private:
     bool CreateTransform(bool hardware, std::string& error);
@@ -68,6 +83,8 @@ private:
     bool ApplyRateControl(std::string& error);
     bool DrainOne(bool& produced, std::string& error);
     bool StorePacket(IMFSample* sample);
+    // 真激活探测的「试一帧」：提交一帧 NV12，有界补帧 + DRAIN 直到拿到首个 H.264 包。
+    bool TryEncodeOneFrame(std::string& error);
     // CBR 补齐：MF 软编的 CBR 只封顶不保底，静态桌面会远低于标称码率。
     // 按「每秒预算 - 本秒已出字节」追加 H.264 filler NAL（type 12），解码器会忽略。
     void PadToTargetBitrate();
@@ -90,8 +107,11 @@ private:
     uint32_t annexb_converted_ = 0;
     bool hardware_ = false;
     bool fail_all_encoders_ = false;
+    bool fail_hardware_encoder_ = false;
+    bool fail_software_encoder_ = false;
     bool open_ = false;
     bool mf_started_ = false;
+    bool com_owned_ = false;
     bool flushing_ = false;
     bool stream_change_handled_ = false;
     const char* rate_control_ = "avg_bitrate";

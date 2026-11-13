@@ -154,8 +154,10 @@ EncoderCaps MfVideoEncoder::Caps() const {
 }
 
 bool MfVideoEncoder::CreateTransform(bool hardware, std::string& error) {
-    if (fail_all_encoders_) {
-        // 注入落在真实的枚举/创建函数内部，Open 里的硬编→软编→失败三条分支都要真实走一遍。
+    // 注入落在真实的枚举/创建函数内部，Open 里的硬编→软编→失败三条分支都要真实走一遍。
+    // 轮 47 新增定向注入（--fail-encoder hardware|software）：无参形式仍等于「全部失败」。
+    if (fail_all_encoders_ || (hardware && fail_hardware_encoder_) ||
+        (!hardware && fail_software_encoder_)) {
         error = hardware ? "injected: hardware encoder unavailable"
                          : "injected: software encoder unavailable";
         return false;
@@ -386,36 +388,41 @@ bool MfVideoEncoder::Open(const VideoEncoderConfig& config, std::string& error) 
     pad_bytes_in_window_ = 0;
 
     const HRESULT com_hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    const bool com_owned = SUCCEEDED(com_hr);
+    com_owned_ = SUCCEEDED(com_hr);
 
     if (FAILED(MFStartup(MF_VERSION, MFSTARTUP_LITE))) {
         error = "MFStartup failed";
-        if (com_owned) {
+        if (com_owned_) {
             CoUninitialize();
+            com_owned_ = false;
         }
         return false;
     }
+    mf_started_ = true;
 
     std::string hardware_error;
     fail_all_encoders_ = config.fail_all_encoders;
+    const bool forced = !requested_id_.empty();
     bool created = false;
-    if (!requested_id_.empty()) {
+    if (forced) {
         // M3-05：显式指定编码器 → 只用这一个，且不回退。
-        // 不可用/找不到 → 明确失败并带原因（调用方走 exit 6）。
-        const std::vector<sr::encode::EncoderInfo> encoders = sr::encode::ListEncoders();
-        const sr::encode::EncoderInfo* found = sr::encode::FindEncoder(encoders, requested_id_);
-        if (found == nullptr) {
+        // 轮 47：不再在录制启动路径跑整表真激活探测（会与 MF 启停嵌套、也重复劳动）。
+        // id 只做静态映射；真正的「能不能用」由下面同一个创建/协商/码控链路判定，
+        // 任何失败统一带 "unavailable: <原因>" 走 exit 6，与列表的探测结论同源。
+        const sr::encode::EncoderLookup lookup = sr::encode::LookupEncoder(requested_id_);
+        if (!lookup.known) {
             error = "encoder '" + requested_id_ + "' not found (see sr-recorder --list-encoders)";
             Close();
             return false;
         }
-        if (!found->available) {
-            error = "encoder '" + requested_id_ + "' unavailable: " + found->reason;
+        if (!lookup.available) {
+            error = "encoder '" + requested_id_ + "' unavailable: " + lookup.reason;
             Close();
             return false;
         }
-        created = CreateTransform(found->hardware, error);
+        created = CreateTransform(lookup.hardware, error);
         if (!created) {
+            error = "encoder '" + requested_id_ + "' unavailable: " + error;
             Close();
             return false;
         }
@@ -431,9 +438,10 @@ bool MfVideoEncoder::Open(const VideoEncoderConfig& config, std::string& error) 
         }
     }
 
-    // 硬编能创建不等于能协商：协商失败必须回退到软编（M3-06 的确定性回退）。
+    // 硬编能创建不等于能协商：自动选择时协商失败回退到软编（M3-06 的确定性回退）。
+    // 轮 47 F1：被点名的编码器**不许回退**——静默换成软编会让用户以为自己在用硬编。
     if (!Negotiate(error)) {
-        if (hardware_) {
+        if (hardware_ && !forced) {
             const std::string hardware_negotiate_error = error;
             transform_.Reset();
             std::string software_error;
@@ -443,6 +451,9 @@ bool MfVideoEncoder::Open(const VideoEncoderConfig& config, std::string& error) 
                 return false;
             }
         } else {
+            if (forced) {
+                error = "encoder '" + requested_id_ + "' unavailable: MFT 协商失败（" + error + "）";
+            }
             Close();
             return false;
         }
@@ -455,6 +466,13 @@ bool MfVideoEncoder::Open(const VideoEncoderConfig& config, std::string& error) 
     if (!cbr_ && !vbr_) {
         rate_control_ = "avg_bitrate";
     } else if (!ApplyRateControl(rate_control_error)) {
+        // 轮 47 F1：码控失败同样不许借回退把「点名硬编」悄悄换成软编。
+        if (forced) {
+            error = "encoder '" + requested_id_ + "' unavailable: MFT 码控协商失败（" +
+                    rate_control_error + "）";
+            Close();
+            return false;
+        }
         if (!hardware_) {
             rate_control_error_ = rate_control_error;
         } else {
@@ -765,16 +783,93 @@ bool MfVideoEncoder::Flush(std::string& error) {
     return true;
 }
 
+bool MfVideoEncoder::TryEncodeOneFrame(std::string& error) {
+    if (!open_ || transform_ == nullptr) {
+        error = "encoder is not open";
+        return false;
+    }
+    const size_t frame_bytes = static_cast<size_t>(width_) * static_cast<size_t>(height_) * 3 / 2;
+    if (frame_bytes == 0) {
+        error = "invalid probe frame size";
+        return false;
+    }
+    // 中性灰一帧 NV12（Y=0x80 / UV=0x80）：只验证 MFT 真能收帧并吐包，不测画质。
+    const std::vector<uint8_t> nv12(frame_bytes, 0x80);
+    // 带 B 帧的编码器会先缓冲：单帧拿不到包不等于不可用，故有界补到 4 帧再 DRAIN。
+    for (uint32_t frame = 0; frame < 4; ++frame) {
+        if (!SubmitBytes(nv12.data(), nv12.size(), static_cast<int64_t>(frame) * frame_duration_)) {
+            error = "MFT ProcessInput 拒绝 NV12 帧";
+            return false;
+        }
+        for (int attempt = 0; attempt < 8; ++attempt) {
+            EncodedPacket packet;
+            if (TryReceive(packet) && packet.size > 0) {
+                return true;
+            }
+        }
+    }
+    std::string flush_error;
+    if (!Flush(flush_error)) {
+        error = "MFT DRAIN 失败（" + flush_error + "）";
+        return false;
+    }
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        EncodedPacket packet;
+        if (TryReceive(packet) && packet.size > 0) {
+            return true;
+        }
+    }
+    error = "MFT 试编码未产出 H.264 包（1~4 帧 + DRAIN）";
+    return false;
+}
+
+bool MfVideoEncoder::ProbeAvailable(bool hardware, const EncoderProbeOptions& options,
+                                    std::string& error) {
+    // 与录制同一条路径：SetRequestedId 让协商/码控失败不回退，从而「列表说可用」
+    // 与「--encoder <id> 真的用上它」由同一份实现保证，不会各写一遍口径。
+    MfVideoEncoder probe;
+    probe.SetRequestedId(hardware ? "mf-h264-hw" : "mf-h264-sw");
+    probe.SetFailureInjection(options.fail_hardware, options.fail_software);
+
+    // 代表性的录制参数（1280×720@30 / 6000kbps CBR）：与 --record 的默认档同量级。
+    sr::VideoEncoderConfig config;
+    config.width = 1280;
+    config.height = 720;
+    config.fps = 30;
+    config.bitrate_kbps = 6000;
+    config.max_bitrate_kbps = 12000;
+    config.rate_control = sr::RateControlMode::Cbr;
+
+    if (!probe.Open(config, error)) {
+        error = "Open: " + error;
+        return false;
+    }
+    if (!probe.TryEncodeOneFrame(error)) {
+        error = "试编码一帧: " + error;
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
 void MfVideoEncoder::Close() {
     if (transform_ != nullptr) {
         transform_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
         transform_->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
     }
     transform_.Reset();
-    if (open_) {
+    // 轮 47：启停按「本次 Open 是否真的启动过」配对，而不是按 open_。
+    // 此前 Open 失败（探测常见路径）不关 MF、也不 CoUninitialize，重复探测会累积引用；
+    // 现在失败分支同样释放，探测器可反复重试且不遗留 COM/MF 引用。
+    if (mf_started_) {
         MFShutdown();
-        open_ = false;
+        mf_started_ = false;
     }
+    if (com_owned_) {
+        CoUninitialize();
+        com_owned_ = false;
+    }
+    open_ = false;
     submitted_ = 0;
     encoded_frames_ = 0;
     flushing_ = false;

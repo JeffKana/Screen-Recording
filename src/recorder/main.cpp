@@ -79,6 +79,8 @@ struct Options {
     uint32_t cancel_at_seconds = 0;
     bool fail_resume = false;
     bool fail_encoder = false;
+    // 轮 47：--fail-encoder 的可选目标（hardware / software / all）；空 = 全部失败（既有语义）。
+    std::string fail_encoder_target;
     uint64_t fail_write_after = 0;
     bool fail_resume_backend = false;
     std::string fallback_dir;
@@ -96,6 +98,8 @@ struct Options {
     std::string list_skip;
     // M3-05：列出实际可用的编码器（探测在设置页/本命令里做，不进录制启动路径）。
     bool list_encoders = false;
+    // 轮 47：同一进程里重复探测 N 次，核验「失败可重试 / 状态不被缓存」；句柄数是观测值。
+    uint32_t probe_repeat = 1;
     // M3-05：强制指定编码器 id（不可用则开录失败并给原因）。
     std::string encoder_id;
     // M6-03 验收：每 N 帧注入一次丢帧（0 = 不注入）
@@ -137,8 +141,9 @@ void PrintUsage() {
         "  --inject-drop-every <n>  每 n 帧注入一次丢帧（M6-03 验收）\n"
         "  --force-cpu             强制走既有 CPU 中转路径（M6-08#2 验收；验证的是既有降级能力）\n"
         "  --diag-window-test <file> 用合成日志验证诊断包「只留最近 10 分钟」的裁剪\n"
-        "  --fail-resume / --fail-encoder / --fail-write-after <n> / --fail-resume-backend\n"
-        "  --fallback-dir <dir> / --fallback-commit <part>\n");
+        "  --fail-resume / --fail-encoder [hardware|software|all] / --fail-write-after <n> / --fail-resume-backend\n"
+        "  --fallback-dir <dir> / --fallback-commit <part>\n"
+        "  --probe-repeat <n>    与 --list-encoders 合用：同进程重复探测 n 次（重试/泄漏护栏）\n");
 #endif
 }
 
@@ -243,6 +248,20 @@ bool ParseArgs(int argc, char** argv, Options& options) {
             options.fail_resume = true;
         } else if (std::strcmp(arg, "--fail-encoder") == 0) {
             options.fail_encoder = true;
+            // 可选目标只吃三个字面量；别的参数（含无参形式）一律保持既有语义，
+            // 不让 --fail-encoder --out ... 这类组合被误吞掉下一个开关。
+            if (i + 1 < argc) {
+                const char* next = argv[i + 1];
+                if (std::strcmp(next, "hardware") == 0 || std::strcmp(next, "software") == 0 ||
+                    std::strcmp(next, "all") == 0) {
+                    options.fail_encoder_target = argv[++i];
+                }
+            }
+        } else if (std::strcmp(arg, "--probe-repeat") == 0 && i + 1 < argc) {
+            options.probe_repeat = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 10));
+            if (options.probe_repeat == 0 || options.probe_repeat > 20) {
+                options.probe_repeat = 1;
+            }
         } else if (std::strcmp(arg, "--fail-write-after") == 0 && i + 1 < argc) {
             options.fail_write_after = std::strtoull(argv[++i], nullptr, 10);
         } else if (std::strcmp(arg, "--fail-resume-backend") == 0) {
@@ -469,8 +488,35 @@ int RunList(const std::string& dir, const std::string& skip_prefix) {
 // M3-05：编码器列表。探测只在这里做（不进录制启动路径）。
 // 输出的 `encoders=[...]` 是规范单行序列化：UI 直接复制这一行到自己的日志，
 // 「日志与 UI 列表逐项一致」因此是构造上成立的，不靠两边各写一遍格式。
-int RunListEncoders() {
-    const std::vector<sr::encode::EncoderInfo> encoders = sr::encode::ListEncoders();
+int RunListEncoders(const Options& options) {
+    sr::encode::EncoderProbeOptions probe;
+    if (options.fail_encoder) {
+        const std::string& target = options.fail_encoder_target;
+        const bool all = target.empty() || target == "all";
+        probe.fail_hardware = all || target == "hardware";
+        probe.fail_software = all || target == "software";
+    }
+
+    // 轮 47：--probe-repeat >1 时在同一进程里重复真激活探测，逐轮打状态与句柄数，
+    // 供用例核验「探测失败可重试、状态不被缓存」。默认 1 次，输出格式不变。
+    // 探测器自身不创建/不持有 D3D device 或 video processor；句柄数只是可核验的观测值，
+    // 产品路径里每次探测都在一次性子进程中完成（UI 设置页 spawn sr-recorder）。
+    std::vector<sr::encode::EncoderInfo> encoders;
+    const bool report_repeat = options.probe_repeat > 1;
+    for (uint32_t iteration = 0; iteration < options.probe_repeat; ++iteration) {
+        encoders = sr::encode::ListEncoders(probe);
+        if (report_repeat) {
+            DWORD handles = 0;
+            (void)GetProcessHandleCount(GetCurrentProcess(), &handles);
+            const sr::encode::EncoderInfo* sw = sr::encode::FindEncoder(encoders, "mf-h264-sw");
+            const sr::encode::EncoderInfo* hw = sr::encode::FindEncoder(encoders, "mf-h264-hw");
+            std::printf("probe_iteration=%u handles=%lu available_mf_sw=%d available_mf_hw=%d\n",
+                        iteration + 1, static_cast<unsigned long>(handles),
+                        (sw != nullptr && sw->available) ? 1 : 0,
+                        (hw != nullptr && hw->available) ? 1 : 0);
+        }
+    }
+
     const std::string canonical = sr::encode::FormatEncoderList(encoders);
     std::printf("encoder_count=%zu\n", encoders.size());
     std::printf("encoders=[%s]\n", canonical.c_str());
@@ -648,7 +694,7 @@ int main(int argc, char** argv) {
     }
 
     if (options.list_encoders) {
-        return RunListEncoders();
+        return RunListEncoders(options);
     }
 
     if (!options.list_dir.empty()) {
@@ -714,7 +760,14 @@ int main(int argc, char** argv) {
         record_options.pause_duration_list = options.pause_duration_list;
         record_options.cancel_at_seconds = options.cancel_at_seconds;
         record_options.fail_resume = options.fail_resume;
-        record_options.fail_encoder = options.fail_encoder;
+        // 无参 / all = 既有「全部失败」；定向值只让对应一类的 MFT 创建失败。
+        record_options.fail_encoder =
+            options.fail_encoder && (options.fail_encoder_target.empty() ||
+                                     options.fail_encoder_target == "all");
+        record_options.fail_hardware_encoder =
+            options.fail_encoder && options.fail_encoder_target == "hardware";
+        record_options.fail_software_encoder =
+            options.fail_encoder && options.fail_encoder_target == "software";
     // M3-05：强制指定编码器（不可用 → 开录失败并给原因，走 exit 6）。
     record_options.encoder_id = options.encoder_id;
         record_options.fail_write_after = options.fail_write_after;
