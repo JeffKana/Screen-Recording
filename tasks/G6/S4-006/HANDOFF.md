@@ -70,6 +70,10 @@ A/V 在 mdat 里交错，故一个样本一个 chunk（`stsc` 固定 `(1,1,1)`�
 
 ## 2.1 交付通道状态（如实记录，非验收结论）
 
-- 分支：`round/48`，从 `main` @ `91bbbe2` 拉出；`git fetch origin` 当时因 TLS 错误未成功，
-  本地 `origin/main` 引用与用户书面确认的合并 SHA 一致，PR 创建前会再核一次。
-- PR 编号与 CI 三项结果在 PR 创建后由主卡 `V1-021/HANDOFF.md` 补记。
+- 分支：`round/48`，从 `main` @ `91bbbe2` 拉出并已推送；远端 HEAD 经
+  `git ls-remote`（逐命令网络覆盖，不改 git config）核实为 `91bbbe2`。
+- **PR #9** <https://github.com/JeffKana/Screen-Recording/pull/9>（`main` ← `round/48`），
+  **CI 三项全绿**：`checks` / `build (msvc, warnings=0)` / `build (mingw, warnings=0)` 均 success。
+- 网络兜底（系统代理 TLS 握手失败）与 REST 建 PR 的细节见主卡
+  `tasks/G6/V1-021/HANDOFF.md §2.1`。按 SOP §0 / §7，合并权属 O0 且需验收通过，
+  执行侧未自行合并、未写验收结论。

@@ -65,7 +65,16 @@
 
 ## 2.1 交付通道状态（如实记录，非验收结论）
 
-- 分支：`round/48`，从 `main` @ `91bbbe2` 拉出（用户确认 PR #7 / PR #8 已合并、分支已删）。
-  `git fetch origin` 当时因 TLS `unexpected eof while reading` 连续失败，本地 `origin/main` 与
-  `main` 均为 `91bbbe2`，与用户书面确认一致；推送/建 PR 前会再核一次远端。
-- PR 编号与 CI 三项结果在 PR 创建后由第二个提交补记（与轮 46/47 的做法一致）。
+- 分支：`round/48`，从 `main` @ `91bbbe2` 拉出，已推送到 `origin/round/48`。
+  本机 `git fetch/push` 一度因系统代理（`127.0.0.1:7897`）对 GitHub 的 TLS 握手失败而不可用；
+  用**逐命令**覆盖（不改 git config）`-c http.sslBackend=schannel -c ...curloptResolve=github.com:443:20.27.177.113 -c ...proxy=` 后
+  `fetch` / `ls-remote` 成功，远端 HEAD 确认为 `91bbbe2`，随后推送成功。
+- **PR #9** <https://github.com/JeffKana/Screen-Recording/pull/9>（`base=main` ← `head=round/48`，2 提交 / 22 文件，
+  `mergeable=clean`）。描述按 `.github/pull_request_template.md` 五项填写。
+  `gh pr create` 的 GraphQL 通道仍不通，沿用轮 47 的 REST 兜底（`curl --resolve api.github.com:443:140.82.112.6`）。
+- **CI 三项全绿**（`GET /commits/1e15936/check-runs` 轮询）：
+  `checks (contract/coverage/cards/domain)` success、
+  `build (msvc, warnings=0)` success、`build (mingw, warnings=0)` success。
+- CI 只跑静态检查与双构建；集成用例由本机与验收方重跑，**不因 CI 绿就写成集成验收通过**。
+- 按 SOP §0 / §7：**合并权属 O0、且触发条件是验收通过**；执行侧未自行合并、未写验收结论、
+  台账主表轮 48 一行仍留白，等待验收方独立重跑后给结论。
