@@ -73,6 +73,13 @@
 
 ## 2.1 交付通道状态（如实记录，非验收结论）
 
-- 分支：`round/47`，从 `main` @ `560087a` 拉出；`git push -u origin round/47` 后按
-  `.github/pull_request_template.md` 提 PR（base=main、head=round/47）。
-- PR 编号与 CI 三项结果在 PR 创建后由第二个提交补记（与轮 46 `V1-019` 的做法一致）。
+- 分支：`round/47`，从 `main` @ `560087a` 拉出，已 `git push -u origin round/47`。
+- **PR #7**：<https://github.com/JeffKana/Screen-Recording/pull/7>（`base=main`、`head=round/47`），
+  描述按 `.github/pull_request_template.md` 五项填写（任务卡 / 需求→证据 / 自测原始行 /
+  未做与挂账 / 风险与回退）。`gh pr create` 因本机 `api.github.com` GraphQL 连接失败与
+  keyring 令牌不可读而不可用，改用 `gh auth token` + GitHub REST `POST /pulls` 创建，PR 元数据已核验。
+- **CI 三项全绿**（`GET /commits/724d2f1/check-runs` 轮询）：
+  `checks (contract/coverage/cards/domain)` success、
+  `build (msvc, warnings=0)` success、`build (mingw, warnings=0)` success。
+- CI 只跑静态检查与双构建；集成用例（含 12 条一致性断言与规定回归集）由本机与验收方重跑，
+  原始 RESULT 行见 `SELFTEST.md §1/§3`，**不因 CI 绿就写成集成验收通过**。

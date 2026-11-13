@@ -59,4 +59,7 @@
 
 ## 2.1 交付通道状态（如实记录，非验收结论）
 
-- 分支：`round/47`，从 `main` @ `560087a` 拉出；PR 与 CI 结果由主卡 `V1-020` 的第二个提交补记。
+- 分支：`round/47`，从 `main` @ `560087a` 拉出；已推送。
+- **PR #7** <https://github.com/JeffKana/Screen-Recording/pull/7>（`main` ← `round/47`），
+  **CI 三项全绿**：`checks` / `build (msvc, warnings=0)` / `build (mingw, warnings=0)` 均 success。
+- 详细交付通道状态与 `gh`→REST 的创建方式见主卡 `tasks/G6/V1-020/HANDOFF.md §2.1`。
