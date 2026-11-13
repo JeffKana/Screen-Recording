@@ -260,7 +260,7 @@ function Assert-CbrCriteria {
     param([object]$Stats, [long]$BytesWritten, [double]$WallSeconds, [double]$NominalKbps = 6000)
     $v = Get-CbrVerdict -Rates @($Stats.rates) -BytesWritten $BytesWritten `
         -WallSeconds $WallSeconds -NominalKbps $NominalKbps
-    $avgDetail = ("全片平均 {0:N0}kbps vs 标称 {1:N0}kbps，偏差 {2:P1}（判据 ≤10%）；bytes_written={3} / wall_seconds={4}，非逐秒再平均（逐秒均值 {5:N0}kbps 仅作对照）" -f `
+    $avgDetail = ("全片平均 {0:N0}kbps vs 标称 {1:N0}kbps，偏差 {2:P1}（判据 ≤10%）；bytes_written={3} / wall_seconds={4}，非逐秒再平均（逐秒均值 {5:N0}kbps (仅对照)）" -f `
         $v.whole_avg_kbps, $v.nominal_kbps, $v.avg_deviation, $v.bytes_written,
         $v.wall_seconds, $v.rates_avg_kbps)
     Assert 'cbr-average-deviation' ($v.avg_ok) $avgDetail
