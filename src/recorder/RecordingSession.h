@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "core/types/CaptureRequest.h"
+#include "mux/MuxFormat.h"
 
 namespace sr::recorder {
 
@@ -30,6 +31,9 @@ public:
         uint32_t quality = 0;
         uint32_t max_bitrate_kbps = 0;
         std::string output_path = "out.mkv";
+        // 轮 48（M3-09#3）：只影响封装器选择，不进状态机、不影响采集/编码。
+        // 默认 Mkv，保证不带 --format 时的行为逐字节不变。
+        sr::mux::ContainerFormat format = sr::mux::ContainerFormat::Mkv;
         // 调试用：把 Annex-B 码流另存一份，便于用系统解码器验证可解码性。
         std::string dump_elementary_stream;
         // 是否录制系统声音轨（M3-12）；设备不可用时自动降级为纯视频。

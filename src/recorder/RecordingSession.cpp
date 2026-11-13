@@ -17,6 +17,8 @@
 #include "encode/MfAudioEncoder.h"
 #include "encode/MfVideoEncoder.h"
 #include "mux/MkvWriter.h"
+#include "mux/Mp4Writer.h"
+#include "mux/MuxFormat.h"
 #include "platform/win/QpcClock.h"
 #include "core/util/FreePath.h"
 #include "ipc/PipeChannel.h"
@@ -47,6 +49,46 @@ void LogDebug(const std::string& text) {
 void LogWarn(const std::string& text) {
     sr::diag::Warn(text);
 }
+
+// 轮 48（M3-09#3）：格式只在这里分流。两个封装器签名一致、都不进状态机，
+// 所以会话主体（采集/编码/暂停/收尾/状态迁移）一行不改，MKV 分支保持原样。
+class MuxerRouter {
+public:
+    explicit MuxerRouter(sr::mux::ContainerFormat format) : format_(format) {}
+
+    void SetFailWriteAfter(uint64_t writes) {
+        mkv_.SetFailWriteAfter(writes);
+        mp4_.SetFailWriteAfter(writes);
+    }
+    bool Open(const std::string& path, std::string& error) {
+        return IsMp4() ? mp4_.Open(path, error) : mkv_.Open(path, error);
+    }
+    bool SetVideoTrack(const sr::mux::VideoTrackInfo& info, std::string& error) {
+        return IsMp4() ? mp4_.SetVideoTrack(info, error) : mkv_.SetVideoTrack(info, error);
+    }
+    bool SetAudioTrack(const sr::mux::AudioTrackInfo& info, std::string& error) {
+        return IsMp4() ? mp4_.SetAudioTrack(info, error) : mkv_.SetAudioTrack(info, error);
+    }
+    bool WriteVideo(const uint8_t* data, size_t size, int64_t pts, bool keyframe) {
+        return IsMp4() ? mp4_.WriteVideo(data, size, pts, keyframe)
+                       : mkv_.WriteVideo(data, size, pts, keyframe);
+    }
+    bool WriteAudio(const uint8_t* data, size_t size, int64_t pts) {
+        return IsMp4() ? mp4_.WriteAudio(data, size, pts) : mkv_.WriteAudio(data, size, pts);
+    }
+    bool FlushPending() { return IsMp4() ? mp4_.FlushPending() : mkv_.FlushPending(); }
+    bool Close(std::string& error) { return IsMp4() ? mp4_.Close(error) : mkv_.Close(error); }
+    uint64_t BlocksWritten() const { return IsMp4() ? mp4_.BlocksWritten() : mkv_.BlocksWritten(); }
+    uint64_t BytesWritten() const { return IsMp4() ? mp4_.BytesWritten() : mkv_.BytesWritten(); }
+    uint32_t ClusterCount() const { return IsMp4() ? mp4_.ClusterCount() : mkv_.ClusterCount(); }
+
+private:
+    bool IsMp4() const { return format_ == sr::mux::ContainerFormat::Mp4; }
+
+    sr::mux::ContainerFormat format_;
+    sr::mux::MkvWriter mkv_;
+    sr::mux::Mp4Writer mp4_;
+};
 
 bool AppendAnnexB(std::FILE* file, const std::vector<uint8_t>& avcc) {
     // AVCC（4 字节长度前缀）转 Annex-B（00 00 00 01）。
@@ -254,7 +296,7 @@ int RecordingSession::Run(const Options& options, Stats& stats, std::string& err
         " max_kbps=" + std::to_string(stats.rate_control_max_kbps) +
         (encoder.RateControlError().empty() ? "" : " rate_control_error=" + encoder.RateControlError()));
 
-    sr::mux::MkvWriter muxer;
+    MuxerRouter muxer(options.format);
     // 录制中写临时文件，正常收尾才改名为成品（M5-04）；崩溃后残留的 .part 供恢复流程处理。
     // 建目录、可写探测、同名避让统一在 PrepareOutputPath 里做（M5-15 / M8-06）。
     sr::recorder::OutputPlan output_plan;
@@ -298,7 +340,7 @@ int RecordingSession::Run(const Options& options, Stats& stats, std::string& err
     } else {
         Log(std::string("disk probe failed, continuing without guard: ") + disk_error);
     }
-    sr::mux::MkvWriter::VideoTrackInfo track;
+    sr::mux::VideoTrackInfo track;
     track.width = converter.Width();
     track.height = converter.Height();
     track.fps = options.fps;
@@ -343,7 +385,7 @@ int RecordingSession::Run(const Options& options, Stats& stats, std::string& err
                 audio_source.reset();
                 audio_ok = false;
             } else {
-                sr::mux::MkvWriter::AudioTrackInfo audio_track;
+                sr::mux::AudioTrackInfo audio_track;
                 audio_track.sample_rate = rate;
                 audio_track.channels = channels;
                 audio_track.codec_private = audio_encoder.CodecPrivate();
