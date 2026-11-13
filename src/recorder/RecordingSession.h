@@ -50,6 +50,9 @@ public:
         bool fail_resume = false;
         // 注入：模拟所有编码器不可用（M8-08 全失败分支）
         bool fail_encoder = false;
+        // 轮 47：定向注入（--fail-encoder hardware|software），只让一类 MFT 创建失败。
+        bool fail_hardware_encoder = false;
+        bool fail_software_encoder = false;
         // M3-05：强制指定编码器 id（见 sr-recorder --list-encoders）；空 = 自动选择。
         std::string encoder_id;
         // M6-08#2：令既有 CPU 中转路径可达（仅验收/开发构建暴露 --force-cpu）。
