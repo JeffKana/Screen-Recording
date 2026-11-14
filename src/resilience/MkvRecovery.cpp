@@ -336,7 +336,16 @@ RecoveryItem MkvRecovery::Probe(const std::string& segment_path) {
             }
         }
     } else {
-        item.probe_reason = "no complete video cluster found";
+        // 轮 49（M3-09#1）：MP4 的 .part 在录制期只有 ftyp + mdat，moov 是 Close 时
+        // faststart 生成的。这类文件对 MKV 的「截断到最后一个完整 Cluster」修复不适用，
+        // 判**不可修复并保留**——既不删除用户数据，也不产出「可播但时长错」的文件。
+        // MP4 的崩溃恢复适配登记为 V1.1 前置（docs/22），不在这里冒充。
+        const bool iso_bmff = data.size() >= 8 && data[4] == 'f' && data[5] == 't' &&
+                              data[6] == 'y' && data[7] == 'p';
+        item.probe_reason = iso_bmff
+                                ? "iso-bmff (mp4) part: moov missing; "
+                                  "mp4 crash recovery is V1.1, file kept as-is"
+                                : "no complete video cluster found";
     }
     return item;
 }

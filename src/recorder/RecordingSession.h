@@ -38,6 +38,9 @@ public:
         std::string dump_elementary_stream;
         // 是否录制系统声音轨（M3-12）；设备不可用时自动降级为纯视频。
         bool audio = true;
+        // 轮 49（M3-09#2）：音轨条数（1~8，默认 1）。>1 时容器写出多条独立音轨；
+        // 第 2 条起复用同一路混音输出（真实双源录音属 M1-19 / V1.5，不在本轮冒充）。
+        uint32_t audio_tracks = 1;
         // 磁盘水位阈值（MB，M8-03/M8-04）
         uint32_t disk_warn_mb = 2048;
         uint32_t disk_stop_mb = 128;
@@ -142,6 +145,8 @@ public:
         uint32_t control_reconnects = 0;
         int64_t video_last_pts_ms = 0;
         int64_t audio_last_pts_ms = 0;
+        // 轮 49（M3-09#2）：实际写进容器的音轨条数（MP4 在 V1.0 只有 1 条，见 log 行）。
+        uint32_t audio_tracks = 0;
         // R1（轮 36）：收尾补齐写入的音频帧数 / 其中补静音的帧数。
         // 验收用例据此复算「音轨是否被补到不短于视频」，不靠目测。
         uint64_t audio_tail_fill_frames = 0;

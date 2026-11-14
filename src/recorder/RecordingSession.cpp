@@ -73,8 +73,13 @@ public:
         return IsMp4() ? mp4_.WriteVideo(data, size, pts, keyframe)
                        : mkv_.WriteVideo(data, size, pts, keyframe);
     }
-    bool WriteAudio(const uint8_t* data, size_t size, int64_t pts) {
-        return IsMp4() ? mp4_.WriteAudio(data, size, pts) : mkv_.WriteAudio(data, size, pts);
+    // 轮 49（M3-09#2）：多音轨写入。MP4 在 V1.0 只承载 1 条音轨
+    // （Mp4Writer 的 SetAudioTrack 是覆盖语义），上层已把轨数限制为 1。
+    bool WriteAudio(size_t index, const uint8_t* data, size_t size, int64_t pts) {
+        if (IsMp4()) {
+            return index == 0 ? mp4_.WriteAudio(data, size, pts) : false;
+        }
+        return mkv_.WriteAudio(index, data, size, pts);
     }
     bool FlushPending() { return IsMp4() ? mp4_.FlushPending() : mkv_.FlushPending(); }
     bool Close(std::string& error) { return IsMp4() ? mp4_.Close(error) : mkv_.Close(error); }
@@ -363,6 +368,17 @@ int RecordingSession::Run(const Options& options, Stats& stats, std::string& err
     // 所以「音轨末尾 PTS」比「已提交样本数」少 1~2 帧——补齐目标必须把这部分算进去。
     constexpr uint64_t kAacFrameFrames = 1024;
     bool audio_ok = options.audio;
+    // 轮 49（M3-09#2）：只有 MKV 在 V1.0 承载多音轨；MP4 强制回落为 1 条并留日志，
+    // 不静默丢弃用户请求（也不假装写了第 2 条）。
+    size_t audio_track_count = 1;
+    if (options.audio_tracks > 1) {
+        if (options.format == sr::mux::ContainerFormat::Mp4) {
+            LogWarn("audio_tracks=" + std::to_string(options.audio_tracks) +
+                    " requested but mp4 supports 1 audio track in V1.0; keeping 1 track");
+        } else {
+            audio_track_count = std::min<size_t>(options.audio_tracks, 8);
+        }
+    }
 
     if (audio_ok) {
         audio_source = std::make_unique<sr::audio::WasapiSource>(clock, sr::audio::AudioRole::SystemLoopback);
@@ -389,7 +405,19 @@ int RecordingSession::Run(const Options& options, Stats& stats, std::string& err
                 audio_track.sample_rate = rate;
                 audio_track.channels = channels;
                 audio_track.codec_private = audio_encoder.CodecPrivate();
-                muxer.SetAudioTrack(audio_track, audio_error);
+                for (size_t index = 0; index < audio_track_count; ++index) {
+                    if (!muxer.SetAudioTrack(audio_track, audio_error)) {
+                        Log(std::string("set audio track ") + std::to_string(index) + " failed: " + audio_error);
+                        audio_ok = false;
+                        break;
+                    }
+                }
+                if (audio_ok) {
+                    stats.audio_tracks = static_cast<uint32_t>(audio_track_count);
+                    Log("audio_tracks=" + std::to_string(audio_track_count) +
+                        " sample_rate=" + std::to_string(rate) +
+                        " channels=" + std::to_string(channels));
+                }
                 audio_buffer.assign(static_cast<size_t>(kAudioBlockFrames) * channels, 0.0f);
             }
         }
@@ -414,7 +442,14 @@ int RecordingSession::Run(const Options& options, Stats& stats, std::string& err
         }
         sr::EncodedPacket packet;
         while (audio_encoder.TryReceive(packet)) {
-            if (!muxer.WriteAudio(packet.data, packet.size, packet.pts.value)) {
+            bool written = true;
+            for (size_t index = 0; index < audio_track_count; ++index) {
+                // 轮 49（M3-09#2）：同一次编码输出写进每条音轨，各轨各自维护 sample table。
+                if (!muxer.WriteAudio(index, packet.data, packet.size, packet.pts.value)) {
+                    written = false;
+                }
+            }
+            if (!written) {
                 ++stats.write_errors;
             } else {
                 stats.audio_last_pts_ms = packet.pts.value / 10000;
@@ -1227,7 +1262,13 @@ int RecordingSession::Run(const Options& options, Stats& stats, std::string& err
             if (!audio_encoder.TryReceive(packet)) {
                 break;
             }
-            if (muxer.WriteAudio(packet.data, packet.size, packet.pts.value)) {
+            bool written = true;
+            for (size_t index = 0; index < audio_track_count; ++index) {
+                if (!muxer.WriteAudio(index, packet.data, packet.size, packet.pts.value)) {
+                    written = false;
+                }
+            }
+            if (written) {
                 stats.audio_last_pts_ms = packet.pts.value / 10000;
             } else {
                 ++stats.write_errors;
