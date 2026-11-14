@@ -278,15 +278,61 @@ if (-not $ffbin) {
 # ================================================================ M6-04#2 均失败落软编且录制成功
 Write-Host '--- M6-04#2 硬编均不可用时落软编、录制成功（含全失败双分支）---'
 $encList = & $exe --list-encoders 2>&1 | Out-String
-$hardIds = @('nvenc-h264', 'qsv-h264', 'amf-h264') | Where-Object { $encList -match [regex]::Escape($_) }
-# 逐条 `encoder=id=...\tavailable=0\treason=<非空>` 才是「不可用原因」的规范单行。
-# `encoders=[...]` 是汇总串（state=unavailable 挤在一行），不能拿它数条目。
-$unavailableLines = @($encList -split "`n" | Where-Object {
-    $_ -match '^encoder=id=' -and $_ -match 'available=0' -and $_ -match 'reason=\S'
+# 轮 48（验收报告-轮47 §2 R1 / 轮48指令 §P0-1）：原断言把「不可用行 == 3」写死，
+# 产品诚实新增第 4 行 `mf-h264-hw unavailable` 就红。改为**数量无关**的两条正向断言
+# + 一条反向护栏；红线是不许改成「>=3」——那仍放得过「新加的项没写原因」。
+# `encoders=[...]` 是汇总串（state=unavailable 挤在一行），不能拿它数条目，只看规范行。
+$vendorIds = @('nvenc-h264', 'qsv-h264', 'amf-h264')
+$unavailableRows = @($encList -split "`r?`n" | Where-Object {
+    $_ -match '^encoder=id=[^\t]+\t' -and $_ -match 'available=0'
 })
-Assert 'm6-04-02-hw-unavailable-with-reason' ($hardIds.Count -eq 3 -and $unavailableLines.Count -eq 3) `
-    ("三厂商硬编 id 命中={0}，逐条标注 available=0 + 非空 reason 的规范行={1}；{2}" -f `
-     $hardIds.Count, $unavailableLines.Count, (($unavailableLines | ForEach-Object { ($_ -split '\t')[0] }) -join ', '))
+$unavailableIds = @($unavailableRows | ForEach-Object {
+    if ($_ -match '^encoder=id=([^\t]+)\t') { $Matches[1] } else { '' }
+})
+
+# 反向用例共用的守卫：三厂商都在 + 每一行都有非空 reason。两个条件缺一不可。
+function Test-UnavailableRows {
+    param([string]$ListText)
+    $rows = @($ListText -split "`r?`n" | Where-Object {
+        $_ -match '^encoder=id=[^\t]+\t' -and $_ -match 'available=0'
+    })
+    # R48-GUARD-BEGIN
+    if ($rows.Count -eq 0) { return $false }
+    $ids = @($rows | ForEach-Object {
+        if ($_ -match '^encoder=id=([^\t]+)\t') { $Matches[1] } else { '' }
+    })
+    foreach ($vendor in @('nvenc-h264', 'qsv-h264', 'amf-h264')) {
+        if ($ids -notcontains $vendor) { return $false }
+    }
+    foreach ($row in $rows) {
+        if ($row -notmatch 'reason=\S') { return $false }
+    }
+    return $true
+    # R48-GUARD-END
+}
+
+$missingVendors = @($vendorIds | Where-Object { $unavailableIds -notcontains $_ })
+Assert 'm6-04-02-vendor-ids-unavailable' ($unavailableRows.Count -gt 0 -and $missingVendors.Count -eq 0) `
+    ("unavailable 行数={0}（数量无关），三厂商命中={1}/3，缺={2}；行={3}" -f `
+     $unavailableRows.Count, (3 - $missingVendors.Count), ($missingVendors -join ','),
+     ($unavailableIds -join ', '))
+
+$rowsWithoutReason = @($unavailableRows | Where-Object { $_ -notmatch 'reason=\S' })
+Assert 'm6-04-02-every-unavailable-has-reason' ($unavailableRows.Count -gt 0 -and
+        $rowsWithoutReason.Count -eq 0 -and (Test-UnavailableRows $encList)) `
+    ("unavailable 行={0}，缺 reason 的行={1}（期望 0）；守卫对真实列表=True" -f `
+     $unavailableRows.Count, $rowsWithoutReason.Count)
+
+# 反向：人为抹掉任意一行 reason → 守卫必须 FAIL（同时校验「确实抹掉了一行」，防止空跑）。
+$blankReasonRx = [regex]'(?m)^(encoder=id=[^\t]+\t[^\r\n]*?available=0\t)reason=[^\r\n]*'
+$tamperedList = $blankReasonRx.Replace($encList, '${1}reason=', 1)
+$blanked = @($tamperedList -split "`r?`n" | Where-Object {
+    $_ -match 'available=0' -and $_ -notmatch 'reason=\S'
+}).Count
+$guardOnTampered = Test-UnavailableRows $tamperedList
+Assert 'm6-04-02-reverse-blank-reason-fails' ($blanked -eq 1 -and -not $guardOnTampered) `
+    ("抹掉 reason 的行数={0}（期望 1），守卫对篡改列表=False（实际={1}）" -f `
+     $blanked, (-not $guardOnTampered))
 
 $fallbackFile = Join-Path $script:work 'm6-04.mkv'
 $fallbackOut = & $exe --record --seconds 3 --fps 30 --out $fallbackFile 2>&1 | Out-String

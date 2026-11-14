@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#include "mux/MuxFormat.h"
+
 namespace sr::mux {
 
 // 极简 Matroska 写入器（02 文档 ADR-02：录制中写分片 MKV）。
@@ -19,20 +21,10 @@ class MkvWriter {
 public:
     ~MkvWriter();
 
-    struct VideoTrackInfo {
-        uint32_t width = 0;
-        uint32_t height = 0;
-        uint32_t fps = 30;
-        // AVCDecoderConfigurationRecord（avcC）
-        std::vector<uint8_t> codec_private;
-    };
-
-    struct AudioTrackInfo {
-        uint32_t sample_rate = 48000;
-        uint16_t channels = 2;
-        // AudioSpecificConfig
-        std::vector<uint8_t> codec_private;
-    };
+    // 轮 48：结构提到 `mux/MuxFormat.h` 供 MP4 复用，保留类内别名，
+    // 既有 `MkvWriter::VideoTrackInfo` 调用方无需改动、行为不变。
+    using VideoTrackInfo = sr::mux::VideoTrackInfo;
+    using AudioTrackInfo = sr::mux::AudioTrackInfo;
 
     bool Open(const std::string& path, std::string& error);
     bool SetVideoTrack(const VideoTrackInfo& info, std::string& error);

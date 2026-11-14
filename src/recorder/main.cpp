@@ -11,6 +11,7 @@
 #include <psapi.h>
 
 #include "encode/EncoderList.h"
+#include "mux/MuxFormat.h"
 #include "ipc/PipeChannel.h"
 #include "platform/win/QpcClock.h"
 #include "recorder/RecordingSession.h"
@@ -26,6 +27,8 @@ namespace {
 constexpr const char* kVersion = "0.1.0";
 constexpr uint32_t kExitAlreadyRunning = 4;
 constexpr uint32_t kExitDiagFailed = 17;
+// 轮 48（M3-09#3）：--format 非法值/缺值 → 参数错误。其余解析失败仍保持历史码 1。
+constexpr uint32_t kExitBadFormatArgument = 2;
 
 // F3：测试注入开关由 SR_TEST_HOOKS 宏隔离；打包构建关掉后这些参数不再被接受。
 #if defined(SR_TEST_HOOKS)
@@ -66,6 +69,11 @@ struct Options {
     // M1-24：是否把鼠标指针写入成片（WGC 支持开关；DXGI/窗口源不支持，见 caps）。
     bool include_cursor = true;
     std::string output = "out.mkv";
+    bool output_explicit = false;
+    // 轮 48：默认 MKV；--format mp4 且未给 --out 时默认文件名跟格式走。
+    sr::mux::ContainerFormat format = sr::mux::ContainerFormat::Mkv;
+    // 解析失败时的退出码：只有 --format 参数错误是 2，其余保持历史行为 1。
+    uint32_t parse_exit_code = 1;
     std::string dump_es;
     // 崩溃恢复（M8-02）：扫描目录或修复单个 .part 文件
     uint32_t disk_warn_mb = 2048;
@@ -124,6 +132,7 @@ void PrintUsage() {
         "  --scan       <dir> 扫描可恢复分片 / --repair <part> 修复单个分片\n"
         "  --list-encoders  列出实际可用的视频编码器（含不可用项与原因，M3-05）\n"
         "  --encoder    <id>  强制指定编码器（见 --list-encoders 的 id）；不可用则开录失败\n"
+        "  --format     mkv|mp4 封装格式（默认 mkv）；mp4 建议同时给 --out xxx.mp4\n"
         "  --record     直接录制一段（不启动 UI），配合 --seconds/--fps/--out 使用\n"
         "  --window     <hwnd> 按窗口录制，hwnd 支持十进制或 0x 十六进制；\n"
         "               仅窗口源下有效，指定后忽略 --region/--display（窗口源优先）\n"
@@ -195,6 +204,24 @@ bool ParseArgs(int argc, char** argv, Options& options) {
             }
         } else if (std::strcmp(arg, "--out") == 0 && i + 1 < argc) {
             options.output = argv[++i];
+            options.output_explicit = true;
+        } else if (std::strcmp(arg, "--format") == 0) {
+            // M3-09#3：非法值/缺值 → exit 2 + usage，不静默回退到默认格式。
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "missing --format value (mkv|mp4)\n");
+                options.parse_exit_code = kExitBadFormatArgument;
+                return false;
+            }
+            const char* value = argv[++i];
+            if (std::strcmp(value, "mkv") == 0) {
+                options.format = sr::mux::ContainerFormat::Mkv;
+            } else if (std::strcmp(value, "mp4") == 0) {
+                options.format = sr::mux::ContainerFormat::Mp4;
+            } else {
+                std::fprintf(stderr, "invalid --format value: %s (mkv|mp4)\n", value);
+                options.parse_exit_code = kExitBadFormatArgument;
+                return false;
+            }
         } else if (std::strcmp(arg, "--dump-es") == 0 && i + 1 < argc) {
             options.dump_es = argv[++i];
         } else if (std::strcmp(arg, "--disk-warn-mb") == 0 && i + 1 < argc) {
@@ -537,7 +564,7 @@ int main(int argc, char** argv) {
     Options options;
     if (!ParseArgs(argc, argv, options)) {
         PrintUsage();
-        return 1;
+        return static_cast<int>(options.parse_exit_code);
     }
     if (options.show_help) {
         PrintUsage();
@@ -749,6 +776,12 @@ int main(int argc, char** argv) {
         record_options.window_handle = options.window_handle;
         record_options.fit_mode = options.fit_mode;
         record_options.output_path = options.output;
+        // --format mp4 且未显式给 --out：默认名跟格式走，避免把 MP4 内容写进 out.mkv。
+        if (options.format == sr::mux::ContainerFormat::Mp4 &&
+            !options.output_explicit && options.output == "out.mkv") {
+            record_options.output_path = "out.mp4";
+        }
+        record_options.format = options.format;
         record_options.dump_elementary_stream = options.dump_es;
         record_options.disk_warn_mb = options.disk_warn_mb;
         record_options.disk_stop_mb = options.disk_stop_mb;
