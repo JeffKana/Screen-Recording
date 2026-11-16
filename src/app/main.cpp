@@ -368,12 +368,15 @@ bool BuildOutputPath(const std::wstring& out_override,
         stem.resize(stem.size() - 4);
     }
 
+    // 轮 49（M3-09#1/#3）：扩展名跟随选定的容器格式（默认 MKV），不再写死 .mkv。
+    // 顺序保持「模板展开 → {index} → 扩展名」，_001 避让发生在同格式命名空间内。
+    const std::wstring extension = config.container == L"mp4" ? L".mp4" : L".mkv";
     const std::filesystem::path directory(config.output_dir);
     std::error_code ec;
     for (int index = 1; index <= 999; ++index) {
         std::wstring name = has_index ? ReplaceAll(stem, L"{index}", FormatIndex(index))
                                       : stem + L"_" + FormatIndex(index);
-        const std::filesystem::path candidate = directory / (name + L".mkv");
+        const std::filesystem::path candidate = directory / (name + extension);
         ec.clear();
         if (!std::filesystem::exists(candidate, ec)) {
             output = candidate.wstring();
@@ -1174,7 +1177,7 @@ void StartRecording(AppState& app) {
     app.last_output = output;
     app.session_active = true;
     app.toolbar_user_hidden = false;
-    Log(L"start_request out=%ls", output.c_str());
+    Log(L"start_request out=%ls container=%ls", output.c_str(), app.config.container.c_str());
     // M1-27：录制中同样要有提示（开录前自检已经提示过一次，这里补「录制中」这一份）。
     if (!app.elevated) {
         Log(L"uac_warning phase=recording elevated=0 reason=not_elevated action=restart_as_admin");
@@ -1183,7 +1186,7 @@ void StartRecording(AppState& app) {
 
     if (!app.recorder.Start(app.config.recorder_path, output, app.config.region,
                             app.config.video_bitrate_kbps, app.config.disk_stop_mb,
-                            app.config.video_fps, app.config.rate_mode,
+                            app.config.video_fps, app.config.rate_mode, app.config.container,
                             [](const std::wstring& text) { Log(L"%ls", text.c_str()); },
                             [&app](const sr::ipc::StateSnapshotPayload& snapshot) {
                                 const auto state = static_cast<sr::RecorderState>(snapshot.state);
@@ -3425,6 +3428,7 @@ void PrintUsage() {
         L"调试开关（SR_TEST_HOOKS=ON 的构建才有，Release 交付包不含）:\n"
         L"  sr-ui --set-hotkey <start|pause|stop> <combo> [--config <ini>]\n"
         L"  sr-ui --set-output <dir> / --set-template <template> / --set-region <x,y,w,h|full>\n"
+        L"  sr-ui --set-container <mkv|mp4>  （输出扩展名与 --format 跟随该值，默认 mkv）\n"
         L"  sr-ui --preflight-fail <disk|display|audio|encoder>\n"
         L"  sr-ui --show-list  （启动即打开录制列表，供 M5-06 验收）\n"
         L"  sr-ui --show-settings （启动即打开设置页，供 M3-05 验收）\n"
@@ -3524,6 +3528,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     std::wstring set_hotkey_combo;
     std::wstring set_output_dir;
     std::wstring set_template_text;
+    // 轮 49（M3-09#1/#3）：容器格式（mkv/mp4）的持久化入口，不走 GUI。
+    std::wstring set_container_text;
     std::wstring set_region_text;
     std::wstring preflight_fail;
     std::wstring set_fps_text;
@@ -3590,6 +3596,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             take(set_output_dir);
         } else if (arg == L"--set-template") {
             take(set_template_text);
+        } else if (arg == L"--set-container") {
+            take(set_container_text);
         } else if (arg == L"--set-region") {
             take(set_region_text);
         } else if (arg == L"--preflight-fail") {
@@ -3871,7 +3879,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         return ok ? 0 : 13;
     }
 
-    if (!set_output_dir.empty() || !set_template_text.empty()) {
+    if (!set_output_dir.empty() || !set_template_text.empty() || !set_container_text.empty()) {
         AttachParentConsole();
         bool ok = true;
         std::wstring error;
@@ -3891,6 +3899,18 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             } else {
                 Log(L"output_dir_saved dir=%ls", set_output_dir.c_str());
                 std::wprintf(L"output_dir_saved %s\n", set_output_dir.c_str());
+            }
+        }
+        // 轮 49（M3-09#1/#3）：容器格式写入 [output] container，回读校验后才允许录制。
+        if (ok && !set_container_text.empty()) {
+            if (!sr::app::SaveContainer(config_path, set_container_text, error)) {
+                ok = false;
+                Log(L"container_rejected container=%ls reason=%ls",
+                    set_container_text.c_str(), error.c_str());
+                std::wprintf(L"container_rejected: %s\n", error.c_str());
+            } else {
+                Log(L"container_saved container=%ls", set_container_text.c_str());
+                std::wprintf(L"container_saved %s\n", set_container_text.c_str());
             }
         }
         if (ok && !set_template_text.empty()) {

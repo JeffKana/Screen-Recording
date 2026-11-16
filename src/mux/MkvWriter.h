@@ -28,11 +28,15 @@ public:
 
     bool Open(const std::string& path, std::string& error);
     bool SetVideoTrack(const VideoTrackInfo& info, std::string& error);
+    // 轮 49（M3-09#2）：每调用一次追加一条音轨（第 1 次 = TrackNumber 2）。
+    // 单音轨只调用一次 —— 输出的 EBML 与轮 48 逐字节一致（回归口径）。
     bool SetAudioTrack(const AudioTrackInfo& info, std::string& error);
 
     // pts 为 100ns 单位（与 MF 一致），内部换算成 ms。
     bool WriteVideo(const uint8_t* data, size_t size, int64_t pts_100ns, bool keyframe);
-    bool WriteAudio(const uint8_t* data, size_t size, int64_t pts_100ns);
+    // track_index 从 0 起（0 = TrackNumber 2）。越界返回 false，不静默丢样本。
+    // 单音轨只需传 0：输出的 EBML 与轮 48 的单音轨实现逐字节一致。
+    bool WriteAudio(size_t track_index, const uint8_t* data, size_t size, int64_t pts_100ns);
 
     bool Close(std::string& error);
 
@@ -59,7 +63,7 @@ private:
     std::FILE* file_ = nullptr;
     std::string path_;
     VideoTrackInfo video_info_{};
-    AudioTrackInfo audio_info_{};
+    std::vector<AudioTrackInfo> audio_info_{};
     std::vector<uint8_t> cluster_;
     int64_t cluster_base_ms_ = 0;
     bool cluster_open_ = false;
@@ -71,7 +75,6 @@ private:
     uint64_t bytes_written_ = 0;
     uint64_t duration_offset_ = 0;
     bool has_video_ = false;
-    bool has_audio_ = false;
     bool tracks_written_ = false;
     int64_t last_video_ms_ = 0;
 };

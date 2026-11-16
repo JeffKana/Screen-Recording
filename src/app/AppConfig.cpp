@@ -331,6 +331,17 @@ bool LoadConfig(const std::wstring& path, AppConfig& config, std::wstring& error
     if (!filename_template.empty()) {
         config.filename_template = filename_template;
     }
+    // 轮 49（M3-09#1/#3）：容器格式。输出扩展名与下发给 Recorder 的 --format 都跟它走；
+    // 默认仍是 MKV（docs/01 M3-09 已按裁定改为「MKV（V1.0 默认）与 MP4」）。
+    // 非法值不静默回落——否则「选了 mp4 却录成 mkv」看不见。
+    const std::wstring container = ToLower(Trim(ReadProfile(path, kSectionOutput, L"container", L"")));
+    if (!container.empty()) {
+        if (container != L"mkv" && container != L"mp4") {
+            error = L"[output] container 无效: " + container + L"（mkv/mp4）";
+            return false;
+        }
+        config.container = container;
+    }
     const std::wstring bitrate = ReadProfile(path, kSectionOutput, L"bitrate_kbps", L"");
     if (!bitrate.empty()) {
         const unsigned long value = std::wcstoul(bitrate.c_str(), nullptr, 10);
@@ -489,6 +500,15 @@ bool SaveTemplate(const std::wstring& path,
         return false;
     }
     return WriteProfileVerified(path, kSectionOutput, L"template", filename_template, error);
+}
+
+bool SaveContainer(const std::wstring& path, const std::wstring& container, std::wstring& error) {
+    const std::wstring value = ToLower(Trim(container));
+    if (value != L"mkv" && value != L"mp4") {
+        error = L"容器格式无效: " + container + L"（mkv/mp4）";
+        return false;
+    }
+    return WriteProfileVerified(path, kSectionOutput, L"container", value, error);
 }
 
 bool SaveRegion(const std::wstring& path, const CaptureRegion& region, std::wstring& error) {
