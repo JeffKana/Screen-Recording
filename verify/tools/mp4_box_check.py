@@ -4,10 +4,13 @@
 验证「sample table 正确」这件事本身：stts/ctts/stsz/stsc/stco(co64)/stss 的计数、
 时长、偏移必须彼此自洽，且每个 chunk 偏移都落在 mdat 数据区里。
 
+轮 49（M3-09#1 faststart）：布局判据从「moov 允许后置」改为 **moov 必须前置**——
+`ftyp | moov | mdat`，且 moov 起点落在文件前 64KB（容器头可被单次读解析）。
+轮 48 的 `moov-after-mdat` 是起步期的临时口径，已随 faststart 落地作废。
+
 用法:
     python verify/tools/mp4_box_check.py <file.mp4>
 输出: 逐条 PASS/FAIL + `RESULT: N PASS / M FAIL`，退出码 0/1。
-本卡（轮 48）moov 允许后置；faststart 留轮 49，不在这里判。
 """
 
 from __future__ import annotations
@@ -117,11 +120,15 @@ def main() -> int:
     data_end = mdat_off + largesize
     check("mdat-largesize", mdat_header == 16 and largesize == mdat_size,
           f"header={mdat_header} largesize={largesize} box_size={mdat_size}")
-    check("mdat-payload-consistent", data_end == moov[1],
-          f"mdat 数据区 [{data_start},{data_end}) / moov 起点={moov[1]}")
-    # 本卡 moov 后置；faststart 是轮 49 的范围，这里只记录不判失败。
-    check("moov-after-mdat", moov[1] > mdat_off,
-          f"moov_off={moov[1]} > mdat_off={mdat_off}（轮 48 起步：moov 可后置）")
+    # 轮 49：faststart 后 mdat 是最后一个 box，数据区必须一路顶到文件末尾。
+    check("mdat-payload-consistent", data_end == len(data),
+          f"mdat 数据区 [{data_start},{data_end}) / 文件长度={len(data)}")
+    # 轮 49（M3-09#1 faststart）：moov 必须先于 mdat（原始需求「MP4 优先 faststart 布局」）。
+    check("moov-before-mdat", moov[1] < mdat_off,
+          f"moov_off={moov[1]} < mdat_off={mdat_off}（faststart 布局）")
+    # 容器头足够小：一次前 64KB 读取即可拿到 moov（判据 #4 的字节级口径）。
+    check("moov-in-first-64k", moov[1] + moov[3] <= 64 * 1024,
+          f"moov 结束偏移={moov[1] + moov[3]} <= 65536")
 
     mvhd = find(data, moov[1] + 8, moov[1] + moov[3], "mvhd")
     check("has-mvhd", mvhd is not None, "moov 内 mvhd")

@@ -303,10 +303,11 @@ std::vector<uint8_t> StszBox(const std::vector<uint32_t>& sizes) {
 }
 
 // 偏移全在 uint32 范围用 stco；超过则用 co64（避免长录制静默写出错误偏移）。
-std::vector<uint8_t> ChunkOffsetBox(const std::vector<uint64_t>& offsets) {
+// shift：faststart 把 mdat 后移 moov 体积，写表时按平移后的绝对偏移落盘。
+std::vector<uint8_t> ChunkOffsetBox(const std::vector<uint64_t>& offsets, uint64_t shift) {
     bool need_64 = false;
     for (uint64_t offset : offsets) {
-        if (offset > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+        if (offset + shift > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
             need_64 = true;
             break;
         }
@@ -315,9 +316,9 @@ std::vector<uint8_t> ChunkOffsetBox(const std::vector<uint64_t>& offsets) {
     Put32(p, static_cast<uint32_t>(offsets.size()));
     for (uint64_t offset : offsets) {
         if (need_64) {
-            Put64(p, offset);
+            Put64(p, offset + shift);
         } else {
-            Put32(p, static_cast<uint32_t>(offset));
+            Put32(p, static_cast<uint32_t>(offset + shift));
         }
     }
     return FullBox(need_64 ? "co64" : "stco", 0, p);
@@ -576,14 +577,15 @@ bool Mp4Writer::PatchMdatSize(std::string& error) {
         error = "patch mdat largesize failed";
         return false;
     }
-    if (std::fseek(file_, 0, SEEK_END) != 0) {
+    // 回到文件末尾必须用 64 位偏移：>2GB 的录制上 std::fseek 的 long 会落错位。
+    if (!SeekAbs(file_, bytes_written_)) {
         error = "seek back to end failed";
         return false;
     }
     return true;
 }
 
-std::vector<uint8_t> Mp4Writer::BuildVideoTrak(uint32_t movie_duration_ms) const {
+std::vector<uint8_t> Mp4Writer::BuildVideoTrak(uint32_t movie_duration_ms, uint64_t offset_shift) const {
     std::vector<uint8_t> minf;
     std::vector<uint8_t> vmhd;
     Put16(vmhd, 0);       // graphicsmode
@@ -601,7 +603,7 @@ std::vector<uint8_t> Mp4Writer::BuildVideoTrak(uint32_t movie_duration_ms) const
     }
     Append(stbl, StscBox(video_.sizes.size()));
     Append(stbl, StszBox(video_.sizes));
-    Append(stbl, ChunkOffsetBox(video_.offsets));
+    Append(stbl, ChunkOffsetBox(video_.offsets, offset_shift));
     Append(minf, Box("stbl", stbl));
 
     std::vector<uint8_t> mdia;
@@ -615,7 +617,7 @@ std::vector<uint8_t> Mp4Writer::BuildVideoTrak(uint32_t movie_duration_ms) const
     return Box("trak", trak);
 }
 
-std::vector<uint8_t> Mp4Writer::BuildAudioTrak(uint32_t movie_duration_ms) const {
+std::vector<uint8_t> Mp4Writer::BuildAudioTrak(uint32_t movie_duration_ms, uint64_t offset_shift) const {
     std::vector<uint8_t> minf;
     std::vector<uint8_t> smhd;
     Put16(smhd, 0); Put16(smhd, 0);  // balance / reserved
@@ -628,7 +630,7 @@ std::vector<uint8_t> Mp4Writer::BuildAudioTrak(uint32_t movie_duration_ms) const
     Append(stbl, CttsBox(audio_.ctts));
     Append(stbl, StscBox(audio_.sizes.size()));
     Append(stbl, StszBox(audio_.sizes));
-    Append(stbl, ChunkOffsetBox(audio_.offsets));
+    Append(stbl, ChunkOffsetBox(audio_.offsets, offset_shift));
     Append(minf, Box("stbl", stbl));
 
     std::vector<uint8_t> mdia;
@@ -642,7 +644,7 @@ std::vector<uint8_t> Mp4Writer::BuildAudioTrak(uint32_t movie_duration_ms) const
     return Box("trak", trak);
 }
 
-std::vector<uint8_t> Mp4Writer::BuildMoov() const {
+std::vector<uint8_t> Mp4Writer::BuildMoov(uint64_t offset_shift) const {
     const uint64_t audio_ticks = TrackDuration(audio_);
     int64_t max_ctts = 0;
     for (int32_t value : video_.ctts) {
@@ -660,12 +662,64 @@ std::vector<uint8_t> Mp4Writer::BuildMoov() const {
     std::vector<uint8_t> moov;
     Append(moov, MvhdBox(duration_ms, has_audio_ ? 3u : 2u));
     if (has_video_) {
-        Append(moov, BuildVideoTrak(duration_ms));
+        Append(moov, BuildVideoTrak(duration_ms, offset_shift));
     }
     if (has_audio_) {
-        Append(moov, BuildAudioTrak(duration_ms));
+        Append(moov, BuildAudioTrak(duration_ms, offset_shift));
     }
     return Box("moov", moov);
+}
+
+// faststart 的实现代价：moov 必须先于 mdat 落盘，而 moov 里 stco 记的是绝对偏移，
+// 又依赖 moov 自身体积 —— 先把 mdat 数据区整体后移，再把 moov 写到腾出来的位置。
+// 从尾部往前分块搬（目标地址恒高于尚未读取的源地址），单文件原地完成：
+//   * 不额外占用一块与成片等大的磁盘（长录制常见 1~20GB，第二份拷贝会顶爆水位）；
+//   * 不留 <name>.faststart 这类半成品临时文件。
+// 代价是收尾时一次全量 I/O；崩溃在搬移窗口内 → .part 没有可用 moov，恢复流程判不可修复并保留。
+bool Mp4Writer::MoveMdatForward(uint64_t shift, std::string& error) {
+    if (shift == 0) {
+        return true;
+    }
+    const uint64_t begin = mdat_offset_;
+    const uint64_t end = bytes_written_;  // 此刻 EOF == mdat 末尾
+    if (end <= begin) {
+        error = "mdat is empty, nothing to shift";
+        return false;
+    }
+    if (std::fflush(file_) != 0) {
+        error = "flush before mdat shift failed";
+        return false;
+    }
+
+    constexpr size_t kChunk = 1u << 20;  // 1MB：够大以减少系统调用，够小以避免爆内存
+    std::vector<uint8_t> buffer(kChunk);
+    uint64_t cursor = end;
+    while (cursor > begin) {
+        const size_t length = static_cast<size_t>(std::min<uint64_t>(kChunk, cursor - begin));
+        cursor -= length;
+        if (!SeekAbs(file_, cursor)) {
+            error = "seek to mdat chunk failed";
+            return false;
+        }
+        if (std::fread(buffer.data(), 1, length, file_) != length) {
+            error = "read mdat chunk failed";
+            return false;
+        }
+        if (!SeekAbs(file_, cursor + shift)) {
+            error = "seek to shifted mdat chunk failed";
+            return false;
+        }
+        if (std::fwrite(buffer.data(), 1, length, file_) != length) {
+            error = "write mdat chunk failed";
+            return false;
+        }
+    }
+    if (!SeekAbs(file_, end + shift)) {
+        error = "seek to end after mdat shift failed";
+        return false;
+    }
+    bytes_written_ += shift;
+    return true;
 }
 
 bool Mp4Writer::Close(std::string& error) {
@@ -674,26 +728,53 @@ bool Mp4Writer::Close(std::string& error) {
         return false;
     }
 
+    // 保留底层函数写下的具体原因（seek/read/write 哪个环节失败），只补一层上下文。
+    auto fail = [&](const char* text) {
+        if (error.empty()) {
+            error = text;
+        }
+        std::fflush(file_);
+        std::fclose(file_);
+        file_ = nullptr;
+        return false;
+    };
+
     // 收尾生成 sample table：stts 来自排序后的真实 DTS 差，ctts 还原 B 帧显示顺序。
     // nominal 只在「只有一个样本」时兜底，不是逐帧累加 1/fps。
     FinalizeTrack(video_, video_.timescale / (video_info_.fps == 0 ? 30u : video_info_.fps));
     FinalizeTrack(audio_, 1024);
 
     if (!PatchMdatSize(error)) {
-        std::fflush(file_);
-        std::fclose(file_);
-        file_ = nullptr;
-        return false;
+        return fail("patch mdat largesize failed");
     }
 
-    const std::vector<uint8_t> moov = BuildMoov();
-    if (!WriteRaw(moov.data(), moov.size())) {
-        error = "write moov failed";
-        std::fflush(file_);
-        std::fclose(file_);
-        file_ = nullptr;
-        return false;
+    // faststart：moov 必须先于 mdat。moov 的体积取决于 stco 里的绝对偏移，
+    // 而偏移又随 moov 体积整体平移 —— 迭代到「moov 体积 == 平移量」为止。
+    // 正常情况 1~2 次收敛；stco→co64 跨 4GB 边界时可能多一次。
+    uint64_t shift = 0;
+    std::vector<uint8_t> moov = BuildMoov(0);
+    for (int iteration = 0; iteration < 4 && moov.size() != shift; ++iteration) {
+        shift = moov.size();
+        moov = BuildMoov(shift);
     }
+    if (moov.size() != shift) {
+        return fail("moov size did not converge");
+    }
+
+    if (!MoveMdatForward(shift, error)) {
+        return fail("shift mdat for faststart failed");
+    }
+    // mdat 已让位：moov 落进腾出来的 [mdat_offset_, mdat_offset_+shift)，
+    // 必须显式 seek 回来 —— 搬移结束时文件指针在末尾（mdat 之后），追写会变成 moov 后置。
+    if (!SeekAbs(file_, mdat_offset_)) {
+        return fail("seek to moov slot failed");
+    }
+    if (!WriteRaw(moov.data(), moov.size())) {
+        return fail("write moov failed");
+    }
+    // moov 写在搬移腾出的空隙里，文件总长不变（仍为 end + shift）：
+    // WriteRaw 记账会把这段算成「新增字节」，这里扣回，保证 BytesWritten 等于真实文件长度。
+    bytes_written_ -= moov.size();
 
     std::fflush(file_);
     std::fclose(file_);

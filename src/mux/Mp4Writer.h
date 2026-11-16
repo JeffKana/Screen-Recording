@@ -9,15 +9,17 @@
 
 namespace sr::mux {
 
-// 轮 48 起步切片：极简 ISO BMFF 写入器（与 MkvWriter 并列，接口形状保持一致）。
+// 极简 ISO BMFF 写入器（与 MkvWriter 并列，接口形状保持一致）。
 //
-// 布局：ftyp + mdat(64 位 largesize，边录边写) + moov（Close 时追加，moov 后置）。
-// **faststart（moov 前置）不在本卡范围**，留轮 49；因此 MP4 的崩溃恢复能力弱于 MKV，
-// 见 HANDOFF「已知限制」。两份封装器共用 .part 约定，MKV 行为一字不改。
+// 布局（轮 49 起 faststart）：ftyp + moov + mdat。
+//   * 录制期间先写 ftyp + mdat(64 位 largesize)，边录边写，**不产生 moov**；
+//     Close 时把 moov 生成到内存、整体落在 mdat 之前，再把 mdat 数据区后移 moov 的体积。
+//   * 崩溃语义（与 MKV 不同，见 HANDOFF §2）：录制期的 .part 只有 ftyp + mdat、没有 moov，
+//     恢复流程判「不可修复」并**保留**原文件；MP4 的崩溃恢复适配是 V1.1 的前置，不在 V1.0 冒充。
 //
 // 轨道：1 路 H.264（avcC / AVCC 长度前缀样本）+ 1 路 AAC（AudioSpecificConfig）。
 // video timescale = 90000；audio timescale = sample_rate；movie timescale = 1000。
-// stts 的 delta 一律由相邻真实 PTS 差换算，不用 1/fps 累加；stss 只标真实 IDR
+// stts 的 delta 一律由相邻真实 DTS 差换算，不用 1/fps 累加；stss 只标真实 IDR
 // （扫样本里的 NAL type 5），不信任调用侧按 GOP 假设传进来的 keyframe。
 // 每个样本自成一个 chunk（A/V 在 mdat 里交错），故 stsc 固定一条 (1,1,1)，
 // stco/co64 逐样本给绝对文件偏移。
@@ -71,9 +73,12 @@ private:
     static void FinalizeTrack(Track& track, uint32_t nominal_delta);
     static uint32_t TrackDuration(const Track& track);
     bool PatchMdatSize(std::string& error);
-    std::vector<uint8_t> BuildMoov() const;
-    std::vector<uint8_t> BuildVideoTrak(uint32_t movie_duration_ms) const;
-    std::vector<uint8_t> BuildAudioTrak(uint32_t movie_duration_ms) const;
+    // faststart：把 [mdat_offset_, EOF) 整体后移 shift 字节（从尾部往前分块搬，单文件原地完成）。
+    bool MoveMdatForward(uint64_t shift, std::string& error);
+    // offset_shift：stco/co64 里每个样本偏移的额外平移量（= moov 的体积）。
+    std::vector<uint8_t> BuildMoov(uint64_t offset_shift) const;
+    std::vector<uint8_t> BuildVideoTrak(uint32_t movie_duration_ms, uint64_t offset_shift) const;
+    std::vector<uint8_t> BuildAudioTrak(uint32_t movie_duration_ms, uint64_t offset_shift) const;
 
     std::FILE* file_ = nullptr;
     std::string path_;

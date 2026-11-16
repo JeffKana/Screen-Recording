@@ -28,7 +28,8 @@ constexpr const char* kVersion = "0.1.0";
 constexpr uint32_t kExitAlreadyRunning = 4;
 constexpr uint32_t kExitDiagFailed = 17;
 // 轮 48（M3-09#3）：--format 非法值/缺值 → 参数错误。其余解析失败仍保持历史码 1。
-constexpr uint32_t kExitBadFormatArgument = 2;
+// 轮 49：口径按 CONTRACT §18.2 的「2 = 参数错误（未知选项/非法取值）」，--audio-tracks 同样走它。
+constexpr uint32_t kExitBadArgument = 2;
 
 // F3：测试注入开关由 SR_TEST_HOOKS 宏隔离；打包构建关掉后这些参数不再被接受。
 #if defined(SR_TEST_HOOKS)
@@ -72,7 +73,9 @@ struct Options {
     bool output_explicit = false;
     // 轮 48：默认 MKV；--format mp4 且未给 --out 时默认文件名跟格式走。
     sr::mux::ContainerFormat format = sr::mux::ContainerFormat::Mkv;
-    // 解析失败时的退出码：只有 --format 参数错误是 2，其余保持历史行为 1。
+    // 轮 49（M3-09#2）：音轨条数（1~8）。多音轨只对 MKV 生效。
+    uint32_t audio_tracks = 1;
+    // 解析失败时的退出码：参数错误（--format / --audio-tracks）是 2，其余保持历史行为 1。
     uint32_t parse_exit_code = 1;
     std::string dump_es;
     // 崩溃恢复（M8-02）：扫描目录或修复单个 .part 文件
@@ -133,6 +136,7 @@ void PrintUsage() {
         "  --list-encoders  列出实际可用的视频编码器（含不可用项与原因，M3-05）\n"
         "  --encoder    <id>  强制指定编码器（见 --list-encoders 的 id）；不可用则开录失败\n"
         "  --format     mkv|mp4 封装格式（默认 mkv）；mp4 建议同时给 --out xxx.mp4\n"
+        "  --audio-tracks <1~8> 音轨条数（默认 1）；多音轨仅 mkv 支持，mp4 回落为 1 并记日志\n"
         "  --record     直接录制一段（不启动 UI），配合 --seconds/--fps/--out 使用\n"
         "  --window     <hwnd> 按窗口录制，hwnd 支持十进制或 0x 十六进制；\n"
         "               仅窗口源下有效，指定后忽略 --region/--display（窗口源优先）\n"
@@ -205,11 +209,27 @@ bool ParseArgs(int argc, char** argv, Options& options) {
         } else if (std::strcmp(arg, "--out") == 0 && i + 1 < argc) {
             options.output = argv[++i];
             options.output_explicit = true;
+        } else if (std::strcmp(arg, "--audio-tracks") == 0) {
+            // 轮 49（M3-09#2）：缺值/非数字/越界 → exit 2 + usage，不静默回落到 1。
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "missing --audio-tracks value (1-8)\n");
+                options.parse_exit_code = kExitBadArgument;
+                return false;
+            }
+            const char* text = argv[++i];
+            char* end = nullptr;
+            const unsigned long value = std::strtoul(text, &end, 10);
+            if (end == text || *end != '\0' || value < 1 || value > 8) {
+                std::fprintf(stderr, "invalid --audio-tracks value: %s (1-8)\n", text);
+                options.parse_exit_code = kExitBadArgument;
+                return false;
+            }
+            options.audio_tracks = static_cast<uint32_t>(value);
         } else if (std::strcmp(arg, "--format") == 0) {
             // M3-09#3：非法值/缺值 → exit 2 + usage，不静默回退到默认格式。
             if (i + 1 >= argc) {
                 std::fprintf(stderr, "missing --format value (mkv|mp4)\n");
-                options.parse_exit_code = kExitBadFormatArgument;
+                options.parse_exit_code = kExitBadArgument;
                 return false;
             }
             const char* value = argv[++i];
@@ -219,7 +239,7 @@ bool ParseArgs(int argc, char** argv, Options& options) {
                 options.format = sr::mux::ContainerFormat::Mp4;
             } else {
                 std::fprintf(stderr, "invalid --format value: %s (mkv|mp4)\n", value);
-                options.parse_exit_code = kExitBadFormatArgument;
+                options.parse_exit_code = kExitBadArgument;
                 return false;
             }
         } else if (std::strcmp(arg, "--dump-es") == 0 && i + 1 < argc) {
@@ -782,6 +802,7 @@ int main(int argc, char** argv) {
             record_options.output_path = "out.mp4";
         }
         record_options.format = options.format;
+        record_options.audio_tracks = options.audio_tracks;
         record_options.dump_elementary_stream = options.dump_es;
         record_options.disk_warn_mb = options.disk_warn_mb;
         record_options.disk_stop_mb = options.disk_stop_mb;
@@ -862,6 +883,10 @@ int main(int argc, char** argv) {
         std::printf("state_sequence=%s\n", stats.state_sequence.c_str());
         std::printf("video_last_pts_ms=%lld\n", static_cast<long long>(stats.video_last_pts_ms));
         std::printf("audio_last_pts_ms=%lld\n", static_cast<long long>(stats.audio_last_pts_ms));
+        // 轮 49（M3-09#2）：容器格式与实际写出的音轨条数（MP4 在 V1.0 恒为 ≤1）。
+        std::printf("format=%s\n",
+                    options.format == sr::mux::ContainerFormat::Mp4 ? "mp4" : "mkv");
+        std::printf("audio_tracks=%u\n", stats.audio_tracks);
         std::printf("audio_tail_fill_frames=%llu\n",
                     static_cast<unsigned long long>(stats.audio_tail_fill_frames));
         std::printf("audio_tail_silence_frames=%llu\n",

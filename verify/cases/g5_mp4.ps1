@@ -1,8 +1,11 @@
-# 轮 48 · M3-09#1/#3 起步判据（MP4 writer 主体 + --format 入口）
+# 轮 48 起步 + 轮 49 收口：M3-09#1（MP4 faststart）/ M3-09#3（格式切换）判据
 #
-# 判据来自 `.codebuddy/plans/轮48指令.md` §P0-2 五条 + §P0-3 三条，验收方可独立重跑。
+# 判据来自 `.codebuddy/plans/轮48指令.md` §P0-2 五条 + §P0-3 三条 +
+# `.codebuddy/plans/轮49指令.md` §P0-2（faststart 五条 + .part 语义），验收方可独立重跑。
 #   P0-2 #1 ffprobe format_name/duration  #2 ffmpeg 全片解码  #3 帧数=frames_encoded
 #          #4 音频时长 vs 视频末 PTS ≤100ms  #5 默认不带 --format 仍产 MKV
+#   轮 49  faststart：moov 偏移 < mdat 偏移 / moov 落在前 64KB / box 自检按前置口径
+#          .part 语义：录制期强杀 → .part 只剩 ftyp+mdat（无 moov）→ 判不可修复且保留
 #   P0-3  状态序列一致 / 两容器均通过 1~4 / 非法值 exit 2 + usage
 # 附加护栏：MP4 的 box / sample table 自洽（verify/tools/mp4_box_check.py）、
 #           stss 首个同步样本为 1、--format mp4 未给 --out 时默认名跟随格式。
@@ -129,6 +132,33 @@ function Count-VideoFrames {
     if ($first -match '^\d+$') { return [int]$first }
     return -1
 }
+# 轮 49：顶层 box 扫描（只读文件头，不依赖 ffprobe）——faststart 判据要的是字节级偏移。
+function Get-TopBoxes {
+    param([string]$File, [int]$HeadBytes = 65536)
+    $result = @()
+    if (-not (Test-Path $File)) { return $result }
+    $length = [Math]::Min($HeadBytes, (Get-Item $File).Length)
+    $buffer = New-Object byte[] $length
+    $stream = [System.IO.File]::OpenRead($File)
+    try { [void]$stream.Read($buffer, 0, $length) } finally { $stream.Dispose() }
+    $offset = 0
+    while ($offset + 8 -le $length) {
+        $size = ([int]$buffer[$offset] -shl 24) -bor ([int]$buffer[$offset + 1] -shl 16) -bor `
+                ([int]$buffer[$offset + 2] -shl 8) -bor [int]$buffer[$offset + 3]
+        $type = [System.Text.Encoding]::ASCII.GetString($buffer, $offset + 4, 4)
+        if ($size -eq 1) {
+            if ($offset + 16 -gt $length) { break }
+            $size = 0
+            for ($i = 8; $i -lt 16; $i++) { $size = ($size -shl 8) -bor [int]$buffer[$offset + $i] }
+        }
+        # 录制中的 .part：mdat 用 64 位 largesize 且尚未回填（0）——记一条再停，
+        # 这样「只有 ftyp+mdat、没有 moov」在证据里是看得见的。
+        $result += [pscustomobject]@{ Type = $type; Offset = $offset; Size = $size }
+        if ($size -le 0) { break }
+        $offset += $size
+    }
+    return $result
+}
 
 $seconds = 5
 $mp4 = Join-Path $script:work 'r48.mp4'
@@ -200,6 +230,68 @@ $boxResult = if ($boxRaw -match 'RESULT:\s*(\d+)\s*PASS\s*/\s*(\d+)\s*FAIL') {
 Assert 'r48-mp4-box-sample-table' ($boxResult.Fail -eq 0 -and $boxResult.Pass -ge 35) `
     ("mp4_box_check.py RESULT: {0} PASS / {1} FAIL；原始输出 {2}" -f `
         $boxResult.Pass, $boxResult.Fail, 'box-check.txt')
+
+# ---------------- 轮 49 · P0-2 faststart（moov 前置） ----------------
+Write-Host '--- 轮 49 P0-2 faststart（moov 前置）---'
+$boxes = @(Get-TopBoxes -File $mp4)
+$boxSummary = ($boxes | ForEach-Object { "{0}@{1}+{2}" -f $_.Type, $_.Offset, $_.Size }) -join ' '
+$moovBox = $boxes | Where-Object { $_.Type -eq 'moov' } | Select-Object -First 1
+$mdatBox = $boxes | Where-Object { $_.Type -eq 'mdat' } | Select-Object -First 1
+$moovOffset = if ($moovBox) { $moovBox.Offset } else { -1 }
+$mdatOffset = if ($mdatBox) { $mdatBox.Offset } else { -1 }
+Assert 'r49-faststart-moov-before-mdat' ($moovOffset -ge 0 -and $mdatOffset -gt $moovOffset) `
+    ("顶层 box：{0}；moov_off={1} < mdat_off={2}" -f $boxSummary, $moovOffset, $mdatOffset)
+
+$moovEnd = if ($moovBox) { $moovBox.Offset + $moovBox.Size } else { -1 }
+Assert 'r49-faststart-moov-in-first-64k' ($moovEnd -gt 0 -and $moovEnd -le 65536) `
+    ("moov 结束偏移={0}（≤65536：前 64KB 内即可解析出容器头）；box 序列 {1}" -f $moovEnd, $boxSummary)
+
+# ---------------- 轮 49 · P0-2 `.part` 语义（缓冲期崩溃 → 不可修复但保留） ----------------
+Write-Host '--- 轮 49 P0-2 .part 语义（录制期强杀）---'
+$crashDir = Join-Path $script:work 'crash'
+New-Item -ItemType Directory -Force -Path $crashDir | Out-Null
+$crashOut = Join-Path $crashDir 'crash.mp4'
+$crashPart = $crashOut + '.part'
+$crashProc = Start-Process -FilePath $RecorderPath -PassThru -WindowStyle Hidden `
+    -WorkingDirectory $crashDir -ArgumentList @('--record', '--seconds', '30', '--fps', '30',
+        '--bitrate', '2000', '--format', 'mp4', '--out', "`"$crashOut`"")
+$deadline = (Get-Date).AddSeconds(12)
+while ((Get-Date) -lt $deadline) {
+    if ((Test-Path $crashPart) -and (Get-Item $crashPart).Length -gt 65536) { break }
+    Start-Sleep -Milliseconds 200
+}
+$partGrew = (Test-Path $crashPart) -and (Get-Item $crashPart).Length -gt 65536
+# 强杀（模拟崩溃）：不经过 Close，因此 .part 里不会有 moov。
+$crashProc | Stop-Process -Force -ErrorAction SilentlyContinue
+$crashProc.WaitForExit(5000) | Out-Null
+$partBoxes = @(Get-TopBoxes -File $crashPart)
+$partSummary = ($partBoxes | ForEach-Object { "{0}@{1}" -f $_.Type, $_.Offset }) -join ' '
+$partHasMoov = ($partBoxes | Where-Object { $_.Type -eq 'moov' }).Count -gt 0
+Assert 'r49-part-written-without-moov' ($partGrew -and -not $partHasMoov) `
+    ("缓冲期强杀后 .part 存在={0} 大小={1}B 顶层 box=[{2}]（faststart 的 moov 只在收尾生成，崩溃时不在盘上）" -f `
+        (Test-Path $crashPart),
+        $(if (Test-Path $crashPart) { (Get-Item $crashPart).Length } else { 0 }), $partSummary)
+
+$probeBefore = (Get-Item $crashPart -ErrorAction SilentlyContinue)
+$repairOut = & $RecorderPath --repair $crashPart 2>&1 | Out-String
+$repairExit = $LASTEXITCODE
+$probeRepairable = if ($repairOut -match 'probe_repairable=(\d+)') { [int]$Matches[1] } else { -1 }
+$probeReason = if ($repairOut -match 'probe_reason=([^\r\n]+)') { $Matches[1].Trim() } else { '' }
+Assert 'r49-part-unrepairable-with-reason' ($repairExit -ne 0 -and $probeRepairable -eq 0 -and
+        $probeReason -match 'iso-bmff|moov') `
+    ("--repair → exit={0}（期望非 0）probe_repairable={1} reason=[{2}]；原始输出 {3}" -f `
+        $repairExit, $probeRepairable, $probeReason, 'crash-repair.txt')
+[System.IO.File]::WriteAllText((Join-Path $script:work 'crash-repair.txt'), $repairOut,
+    [System.Text.UTF8Encoding]::new($false))
+
+$probeAfter = Get-Item $crashPart -ErrorAction SilentlyContinue
+Assert 'r49-part-kept-intact' ($null -ne $probeAfter -and $null -ne $probeBefore -and
+        $probeAfter.Length -eq $probeBefore.Length) `
+    ("判不可修复后 .part 仍保留：大小 {0} → {1}（不删除、不产出「可播但时长错」的成品）" -f `
+        $(if ($probeBefore) { $probeBefore.Length } else { -1 }),
+        $(if ($probeAfter) { $probeAfter.Length } else { -1 }))
+Assert 'r49-part-no-final-output' (-not (Test-Path $crashOut)) `
+    ("崩溃后没有成品 .mp4：{0}（未完成的内容只以 .part 形态保留）" -f (Test-Path $crashOut))
 
 # ---------------- P0-2 #5 / P0-3：MKV 行为与格式切换 ----------------
 Write-Host '--- P0-2 #5 / P0-3 格式切换 ---'

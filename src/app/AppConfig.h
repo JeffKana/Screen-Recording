@@ -43,6 +43,9 @@ struct AppConfig {
     std::wstring recorder_path;
     // M5-02：UI 侧展开的命名模板；支持 {date} {time} {source} {app} {index}。
     std::wstring filename_template = L"sr_{date}_{time}_{index}";
+    // 轮 49（M3-09#1/#3）：容器格式 mkv / mp4。输出扩展名与 --format 都由它决定；
+    // 默认 MKV（V1.0 默认，MP4 的崩溃恢复适配列入 V1.1）。
+    std::wstring container = L"mkv";
     // M2-09 / M8-04：剩余可录时长的输入；与 Recorder 的 --bitrate/--disk-stop-mb 保持一致。
     uint32_t video_bitrate_kbps = 6000;
     uint32_t disk_stop_mb = 128;
@@ -90,6 +93,8 @@ bool SaveHotkey(const std::wstring& path,
 bool SaveOutputDir(const std::wstring& path, const std::wstring& directory, std::wstring& error);
 bool SaveTemplate(const std::wstring& path, const std::wstring& filename_template, std::wstring& error);
 bool SaveRegion(const std::wstring& path, const CaptureRegion& region, std::wstring& error);
+// 轮 49：容器格式写 [output] container（mkv/mp4），写入后回读校验。
+bool SaveContainer(const std::wstring& path, const std::wstring& container, std::wstring& error);
 
 // M3-03 / M3-04：帧率与码率模式（写入 [video] 段，逐项回读校验）。
 bool SaveVideoSettings(const std::wstring& path,

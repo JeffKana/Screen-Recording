@@ -57,6 +57,7 @@ bool RecorderController::Start(const std::wstring& recorder_path,
                                uint32_t disk_stop_mb,
                                uint32_t fps,
                                const std::wstring& rate_mode,
+                               const std::wstring& format,
                                LogFn log,
                                SnapshotFn on_snapshot,
                                std::wstring& error) {
@@ -87,11 +88,14 @@ bool RecorderController::Start(const std::wstring& recorder_path,
                       std::to_wstring(region.height);
     }
     // M3-03 / M3-04：帧率与码率模式由 INI 决定，UI 只负责透传，不在录制层写死。
+    // 轮 49（M3-09#1/#3）：容器格式同样只透传（--format）；空串不下发，保持既有默认 MKV。
+    const std::wstring format_args =
+        format.empty() ? std::wstring() : (L" --format " + format);
     const std::wstring command_line =
         Quote(recorder_path) + L" --record --seconds 3600 --fps " + std::to_wstring(fps) +
         L" --bitrate " + std::to_wstring(bitrate_kbps) +
         L" --rate-mode " + (rate_mode.empty() ? L"cbr" : rate_mode) +
-        L" --disk-stop-mb " + std::to_wstring(disk_stop_mb) +
+        L" --disk-stop-mb " + std::to_wstring(disk_stop_mb) + format_args +
         L" --out " + Quote(output_path) + region_args + L" --control-pipe --control-token " +
         token_ + L" --control-wait 300" + L" --log-level " + log_level_;
 
@@ -99,7 +103,8 @@ bool RecorderController::Start(const std::wstring& recorder_path,
     if (log_) {
         log_(L"recorder_cmd fps=" + std::to_wstring(fps) + L" rate_mode=" +
              (rate_mode.empty() ? L"cbr" : rate_mode) + L" bitrate=" +
-             std::to_wstring(bitrate_kbps));
+             std::to_wstring(bitrate_kbps) + L" format=" +
+             (format.empty() ? L"default" : format));
     // M3-10：档位联动后实际下发的三项值写进日志，验收据此断言「联动真的到了录制进程」。
     if (log_) {
         log_(L"preset_dispatched fps=" + std::to_wstring(fps) + L" bitrate_kbps=" +

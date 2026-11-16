@@ -33,6 +33,9 @@ public:
                uint32_t disk_stop_mb,
                uint32_t fps,
                const std::wstring& rate_mode,
+               // 轮 49（M3-09#1/#3）：容器格式透传给 Recorder 的 --format；
+               // 空串表示不下发（保持既有默认 MKV 行为）。
+               const std::wstring& format,
                LogFn log,
                SnapshotFn on_snapshot,
                std::wstring& error);

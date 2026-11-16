@@ -251,8 +251,9 @@ bool MkvWriter::SetAudioTrack(const AudioTrackInfo& info, std::string& error) {
         error = "file is not open";
         return false;
     }
-    audio_info_ = info;
-    has_audio_ = true;
+    // 轮 49（M3-09#2）：追加一条音轨。TrackNumber 由位置决定（2,3,…），
+    // 首条音轨的 TrackEntry 内容与轮 48 完全相同 —— 单音轨输出无回归。
+    audio_info_.push_back(info);
     error.clear();
     return true;
 }
@@ -284,24 +285,26 @@ bool MkvWriter::WriteTracks() {
         Append(tracks, track_entry);
     }
 
-    if (has_audio_) {
+    for (size_t index = 0; index < audio_info_.size(); ++index) {
+        const AudioTrackInfo& info = audio_info_[index];
+        const uint64_t track_number = 2 + index;  // 视频恒为 1，音轨从 2 起
         std::vector<uint8_t> entry;
-        Append(entry, UIntElement(kTrackNumber, 2));
-        Append(entry, UIntElement(kTrackUid, 2));
+        Append(entry, UIntElement(kTrackNumber, track_number));
+        Append(entry, UIntElement(kTrackUid, track_number));
         Append(entry, UIntElement(kTrackType, 2));
         Append(entry, StringElement(kCodecId, "A_AAC"));
-        if (!audio_info_.codec_private.empty()) {
-            Append(entry, BinaryElement(kCodecPrivate, audio_info_.codec_private));
+        if (!info.codec_private.empty()) {
+            Append(entry, BinaryElement(kCodecPrivate, info.codec_private));
         }
         std::vector<uint8_t> audio;
-        const double sample_rate = static_cast<double>(audio_info_.sample_rate);
+        const double sample_rate = static_cast<double>(info.sample_rate);
         // SamplingFrequency 是 float64
         std::vector<uint8_t> frequency_payload(sizeof(double));
         std::memcpy(frequency_payload.data(), &sample_rate, sizeof(double));
         std::vector<uint8_t> frequency_element;
         PutElement(frequency_element, kSamplingFrequency, frequency_payload);
         Append(audio, frequency_element);
-        Append(audio, UIntElement(kChannels, audio_info_.channels));
+        Append(audio, UIntElement(kChannels, info.channels));
         std::vector<uint8_t> audio_element;
         PutElement(audio_element, kAudioElem, audio);
         Append(entry, audio_element);
@@ -408,12 +411,12 @@ bool MkvWriter::WriteVideo(const uint8_t* data, size_t size, int64_t pts_100ns, 
     return true;
 }
 
-bool MkvWriter::WriteAudio(const uint8_t* data, size_t size, int64_t pts_100ns) {
-    if (!has_audio_ || data == nullptr || size == 0) {
+bool MkvWriter::WriteAudio(size_t track_index, const uint8_t* data, size_t size, int64_t pts_100ns) {
+    if (track_index >= audio_info_.size() || data == nullptr || size == 0) {
         return false;
     }
     const int64_t pts_ms = pts_100ns / 10000;
-    if (!AppendBlock(2, data, size, pts_ms, true)) {
+    if (!AppendBlock(2 + static_cast<uint64_t>(track_index), data, size, pts_ms, true)) {
         return false;
     }
     ++audio_blocks_;
