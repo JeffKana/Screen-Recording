@@ -146,7 +146,10 @@ try {
         "version=$Version",
         "build_sha=$gitSha",
         "build_time=$([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))",
-        "build_flags=SR_TEST_HOOKS=OFF;SR_BUILD_TOOLS=OFF"
+        "build_flags=SR_TEST_HOOKS=OFF;SR_BUILD_TOOLS=OFF",
+        # 轮 50：rc 与 GA 的区分写在包里，避免"包名是 rc、内容像 GA"的歧义（docs/23 §5）。
+        "channel=$(if ($Version -match '-rc\.') { 'rc' } else { 'ga' })",
+        "ga_ready=$(if ($Version -match '-rc\.') { '0' } else { '1' })"
     ) -join "`n"
     [System.IO.File]::WriteAllText((Join-Path $packageRoot 'VERSION.txt'), $versionText + "`n",
                                    [System.Text.UTF8Encoding]::new($false))
