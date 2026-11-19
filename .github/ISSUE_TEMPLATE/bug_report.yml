@@ -1,0 +1,95 @@
+name: Bug report（rc / V1.0）
+description: 反馈 ScreenRecorder 的缺陷。请把「构建 SHA / 诊断包 / 复现步骤 / 是否 MP4」填全，缺一项我们无法定位。
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。这个模板是给 **V1.0-rc** 及之后版本用的（见 `docs/23-V1.0-rc发布定位与口径.md`）。
+        请先看 `RELEASE-NOTES-0.1.0-rc.1.md` 的「已知限制」，MP4 崩溃不可恢复、UAC 提权窗口黑屏、
+        150% DPI 未实测等属于已知项，不需要重复提。
+
+        **前三项（构建 SHA / 诊断包 / 复现步骤）是必填**：没有构建 SHA 我们无法判断你跑的是哪个二进制，
+        没有诊断包看不到日志与配置，没有复现步骤只能用猜的。
+
+  - type: input
+    id: build-sha
+    attributes:
+      label: 构建 SHA（VERSION.txt 里的 source_fingerprint）
+      description: 打开安装目录的 `VERSION.txt`，把 `source_fingerprint=` 后面那一串抄过来（40 位十六进制）。如果你是从源码构建的，填 `git rev-parse HEAD`。
+      placeholder: 例如 4b117cf9a2c1e4d3f5b6a7c8d9e0f1a2b3c4d5e6
+    validations:
+      required: true
+
+  - type: textarea
+    id: diag-package
+    attributes:
+      label: 诊断包（必需的附件）
+      description: |
+        生成方式（任选一种）：
+
+        - 图形界面：设置 → 帮助 → 导出诊断包，选一个空目录；
+        - 命令行：`sr-ui.exe --export-diag <目录>` 或 `sr-recorder.exe --export-diag <目录>`。
+
+        把生成的目录整体压缩后拖进本 issue（或在评论里追加）。**请勿只贴日志片段的截图**：
+        诊断包里才有完整日志、配置快照、环境信息。
+      placeholder: 已附上 diag-YYYYMMDD-HHMMSS.zip（约 x KB）
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤（编号列出，从启动开始）
+      description: 尽量写清分辨率 / 缩放 / 显示器数量 / 编码器 / 容器 / 录制时长 / 是否在录屏过程中操作过热键。
+      placeholder: |
+        1. 启动 sr-ui.exe（版本 xx）
+        2. 设置 → 画质：标准；容器：MKV
+        3. 按 Ctrl+Alt+F9 开始录制，等 60s
+        4. 按 Ctrl+Alt+F11 停止
+        5. 现象：…
+    validations:
+      required: true
+
+  - type: dropdown
+    id: container
+    attributes:
+      label: 是否 MP4（容器格式）
+      description: MP4 在 V1.0 是 opt-in，且录制中崩溃不可恢复——这条决定我们走哪条排查路径。
+      options:
+        - "否：默认 MKV"
+        - "是：--format mp4 / config.ini 里 container=mp4"
+        - "不确定"
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-actual
+    attributes:
+      label: 期望行为 / 实际行为
+      description: 两句就够，别写长文；有报错原文请贴文本而不是截图。
+      placeholder: |
+        期望：停止后生成可播放的 .mkv
+        实际：目录里只有 .mkv.part，播放器打不开
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: 环境
+      description: Windows 版本（`winver`）、CPU、显卡、显示器数量与缩放比例、可用磁盘空间。
+      placeholder: "Win11 24H2 26100 / i5-13500 / UHD 770 / 双屏 100% / D 盘剩余 42GB"
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我看过 RELEASE-NOTES 的「已知限制」，这条不在其中
+          required: true
+        - label: 我附上的诊断包来自出问题的那个构建（同一个 source_fingerprint）
+          required: true
