@@ -299,3 +299,23 @@ dup_ids= False
 | `docs/07` | 主表轮 51 行（结论/发现留白）+「轮 51 记录」节 | :113 / 「## 轮 51 记录」 |
 | `docs/INDEX.md` | 登记 25 / 26 | 编号表 |
 | `README.md` | 顶部加「安装与升级（rc 期）」：先 `uninstall.ps1` 再 `install.ps1`，并写原因 | 文件 :8-20 |
+
+---
+
+## §8 PR 与 CI
+
+```powershell
+gh pr create --base main --head round/51 --title "轮 51 · 发布复核（ER）+ GA 前置（LT-02 / 缺陷分级 / rc 反馈通道）" --body-file tasks/G6/V1-023/artifacts/pr-body.md
+gh pr checks 15
+```
+
+```
+https://github.com/JeffKana/Screen-Recording/pull/15
+
+build (mingw, warnings=0)            pass  1m4s
+build (msvc, warnings=0)             pass  53s
+checks (contract/coverage/cards/domain)  pass  13s
+```
+
+CI 三绿 ✔（远端跑，与本机 LT-01 长跑互不干扰：CI 在 GitHub runner 上构建，
+本机只做只读检查，未在长跑窗口内启动本地构建）。
