@@ -68,6 +68,9 @@ public:
         bool include_cursor = true;
         // 注入：第 N 次写盘后失败（P0-1）
         uint64_t fail_write_after = 0;
+        // 轮 52（R2）：MP4 faststart 预留区字节数（0 = 按 --seconds/--fps 自动估算）。
+        // 只用于调试/验收走回退路径（人为调小 → faststart_fallback=move），不参与成片内容。
+        uint64_t mp4_reserve_bytes = 0;
         // 注入：恢复时强制当前后端不可用，验证真实降级（P0-3 / C11）
         bool fail_resume_backend = false;
         // 写入失败时的兜底目录：修复后提交到此，退出码 16（P0-2）

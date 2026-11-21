@@ -1,6 +1,7 @@
 #include "mux/Mp4Writer.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <limits>
 #include <numeric>
@@ -11,6 +12,31 @@ namespace {
 constexpr uint32_t kMovieTimescale = 1000;
 constexpr uint32_t kVideoTimescale = 90000;
 constexpr uint32_t kIsoLanguageUnd = 0x55C4;  // 'und'（ISO-639-2/T）
+
+// ---- faststart 预留（轮 52 R2）----
+// moov 的样本表开销是「每样本固定字节」：stsz 4 + stco 4（>4GB 时 co64 8）。
+// 取 16 字节/样本（约 1.3~2 倍余量）+ 4KB 固定头，凑成上界；预留多了只是文件里多一段
+// 零填充 free box（播放器跳过），预留少了会走回退搬移路径（判据 #4）。
+constexpr uint64_t kFaststartReserveCap = 64ull * 1024 * 1024;  // 上限 64MB ≈ 12h@30fps
+constexpr uint32_t kAudioFramesPerSecond = 47;                  // 48000/1024 向上取整
+constexpr uint64_t kMoovBytesPerSample = 16;
+
+uint64_t EstimateFaststartReserve(uint64_t seconds, uint32_t fps) {
+    if (seconds == 0) {
+        seconds = 60;  // 时长未知时的兜底：够 1 分钟素材，超出就走回退
+    }
+    if (fps == 0) {
+        fps = 30;
+    }
+    const uint64_t video_samples = seconds * fps + 32;
+    const uint64_t audio_samples = seconds * kAudioFramesPerSecond + 512;
+    uint64_t bytes = 4096 + (video_samples + audio_samples) * kMoovBytesPerSample;
+    if (bytes > kFaststartReserveCap) {
+        bytes = kFaststartReserveCap;
+    }
+    // 8 字节对齐：box 的 size 字段是 4 字节，而「预留区 - moov」要能落一个 ≥8 字节的 free box。
+    return (bytes + 7) & ~static_cast<uint64_t>(7);
+}
 
 void Put8(std::vector<uint8_t>& out, uint8_t value) {
     out.push_back(value);
@@ -408,6 +434,15 @@ void Mp4Writer::SetFailWriteAfter(uint64_t writes) {
     fail_after_ = writes;
 }
 
+void Mp4Writer::SetFaststartReserveHint(uint64_t seconds, uint32_t fps) {
+    reserve_hint_seconds_ = seconds;
+    reserve_hint_fps_ = fps == 0 ? 30 : fps;
+}
+
+void Mp4Writer::SetFaststartReserveOverride(uint64_t bytes) {
+    reserve_override_ = bytes;
+}
+
 bool Mp4Writer::WriteRaw(const void* data, size_t size) {
     if (file_ == nullptr || size == 0) {
         return file_ != nullptr;
@@ -435,6 +470,31 @@ bool Mp4Writer::Open(const std::string& path, std::string& error) {
     if (!WriteRaw(ftyp.data(), ftyp.size())) {
         error = "write ftyp failed";
         return false;
+    }
+
+    // ---- faststart 预留区（轮 52 R2）----
+    // 先把 moov 的位置占住：一个 free box，payload 不写（保持空洞），mdat 从区后开始。
+    // 收尾时 moov 直接覆盖这块区域，mdat 一个字节都不搬。
+    moov_offset_ = bytes_written_;
+    faststart_reserve_ = reserve_override_ != 0
+                             ? ((reserve_override_ + 7) & ~static_cast<uint64_t>(7))
+                             : EstimateFaststartReserve(reserve_hint_seconds_, reserve_hint_fps_);
+    if (faststart_reserve_ >= 8) {
+        std::vector<uint8_t> reserve_box;
+        Put32(reserve_box, static_cast<uint32_t>(faststart_reserve_));
+        PutType(reserve_box, "free");
+        if (!WriteRaw(reserve_box.data(), reserve_box.size())) {
+            error = "write faststart reserve failed";
+            return false;
+        }
+        // 预留区 payload 不落盘（读回为 0）：只把文件指针推到区尾。
+        if (!SeekAbs(file_, moov_offset_ + faststart_reserve_)) {
+            error = "seek past faststart reserve failed";
+            return false;
+        }
+        bytes_written_ = moov_offset_ + faststart_reserve_;
+    } else {
+        faststart_reserve_ = 0;  // 没有预留：收尾走旧的整体搬移路径
     }
 
     // mdat 用 64 位 largesize（size=1 + type + 8 字节 largesize），Close 时回填。
@@ -644,7 +704,7 @@ std::vector<uint8_t> Mp4Writer::BuildAudioTrak(uint32_t movie_duration_ms, uint6
     return Box("trak", trak);
 }
 
-std::vector<uint8_t> Mp4Writer::BuildMoov(uint64_t offset_shift) const {
+std::vector<uint8_t> Mp4Writer::BuildMoov(uint64_t offset_shift, bool align_to_8) const {
     const uint64_t audio_ticks = TrackDuration(audio_);
     int64_t max_ctts = 0;
     for (int32_t value : video_.ctts) {
@@ -659,19 +719,29 @@ std::vector<uint8_t> Mp4Writer::BuildMoov(uint64_t offset_shift) const {
     const uint32_t duration_ms = static_cast<uint32_t>(
         std::min<uint64_t>(movie_ms, std::numeric_limits<uint32_t>::max()));
 
-    std::vector<uint8_t> moov;
-    Append(moov, MvhdBox(duration_ms, has_audio_ ? 3u : 2u));
+    std::vector<uint8_t> payload;
+    Append(payload, MvhdBox(duration_ms, has_audio_ ? 3u : 2u));
     if (has_video_) {
-        Append(moov, BuildVideoTrak(duration_ms, offset_shift));
+        Append(payload, BuildVideoTrak(duration_ms, offset_shift));
     }
     if (has_audio_) {
-        Append(moov, BuildAudioTrak(duration_ms, offset_shift));
+        Append(payload, BuildAudioTrak(duration_ms, offset_shift));
     }
-    return Box("moov", moov);
+    if (align_to_8) {
+        // moov 总体积补到 8 的倍数：预留区与 moov 都是 8 的倍数时，「预留区 - moov」
+        // 只可能是 0 或 ≥8 —— 剩余空间总能落一个合法 free box，不会剩 1~7 字节的非法空隙。
+        const size_t total = 8 + payload.size();
+        const size_t remainder = total % 8;
+        if (remainder != 0) {
+            const size_t pad_box = 8 + (8 - remainder);  // 9~15 字节，仍是一个合法 free box
+            Append(payload, Box("free", std::vector<uint8_t>(pad_box - 8, 0)));
+        }
+    }
+    return Box("moov", payload);
 }
 
-// faststart 的实现代价：moov 必须先于 mdat 落盘，而 moov 里 stco 记的是绝对偏移，
-// 又依赖 moov 自身体积 —— 先把 mdat 数据区整体后移，再把 moov 写到腾出来的位置。
+// faststart 的回退路径：moov 必须先于 mdat，而 moov 里 stco 记的是绝对偏移。
+// 预留区装不下 moov 时，把 mdat 数据区整体后移 (moov - 预留) 字节，再把 moov 写到最前面。
 // 从尾部往前分块搬（目标地址恒高于尚未读取的源地址），单文件原地完成：
 //   * 不额外占用一块与成片等大的磁盘（长录制常见 1~20GB，第二份拷贝会顶爆水位）；
 //   * 不留 <name>.faststart 这类半成品临时文件。
@@ -748,33 +818,63 @@ bool Mp4Writer::Close(std::string& error) {
         return fail("patch mdat largesize failed");
     }
 
-    // faststart：moov 必须先于 mdat。moov 的体积取决于 stco 里的绝对偏移，
-    // 而偏移又随 moov 体积整体平移 —— 迭代到「moov 体积 == 平移量」为止。
-    // 正常情况 1~2 次收敛；stco→co64 跨 4GB 边界时可能多一次。
+    // faststart（轮 52）：moov 先于 mdat。
+    //   * 预留区装得下 → moov 直接回填到预留区，mdat 不动（shift = 0），收尾只写 moov 体积的字节；
+    //   * 装不下 → 回退：mdat 后移 (moov - 预留)，shift 即平移量。
+    // moov 体积取决于 stco 里的绝对偏移（co64 跨 4GB 边界会多 4 字节/样本），
+    // 而偏移又随平移量变 —— 仍是「体积 ↔ 平移量」的不动点，正常 1~2 次收敛。
+    const auto faststart_begin = std::chrono::steady_clock::now();
+    std::vector<uint8_t> moov;
     uint64_t shift = 0;
-    std::vector<uint8_t> moov = BuildMoov(0);
-    for (int iteration = 0; iteration < 4 && moov.size() != shift; ++iteration) {
-        shift = moov.size();
-        moov = BuildMoov(shift);
+    bool converged = false;
+    for (int iteration = 0; iteration < 8; ++iteration) {
+        moov = BuildMoov(shift, true);
+        const uint64_t next_shift =
+            moov.size() > faststart_reserve_ ? moov.size() - faststart_reserve_ : 0;
+        if (next_shift == shift) {
+            converged = true;
+            break;
+        }
+        shift = next_shift;
     }
-    if (moov.size() != shift) {
+    if (!converged) {
         return fail("moov size did not converge");
     }
+    faststart_moov_bytes_ = moov.size();
+    faststart_fallback_ = shift > 0;
 
-    if (!MoveMdatForward(shift, error)) {
+    const uint64_t data_end = bytes_written_;  // 此刻 EOF == mdat 末尾
+    if (!MoveMdatForward(shift, error)) {      // shift == 0：预留命中，直接返回
         return fail("shift mdat for faststart failed");
     }
-    // mdat 已让位：moov 落进腾出来的 [mdat_offset_, mdat_offset_+shift)，
-    // 必须显式 seek 回来 —— 搬移结束时文件指针在末尾（mdat 之后），追写会变成 moov 后置。
-    if (!SeekAbs(file_, mdat_offset_)) {
+
+    // moov 落进 [moov_offset_, moov_offset_+预留) —— 必须显式 seek：
+    // 搬移结束时文件指针在末尾（mdat 之后），追写会变成 moov 后置。
+    if (!SeekAbs(file_, moov_offset_)) {
         return fail("seek to moov slot failed");
     }
     if (!WriteRaw(moov.data(), moov.size())) {
         return fail("write moov failed");
     }
-    // moov 写在搬移腾出的空隙里，文件总长不变（仍为 end + shift）：
-    // WriteRaw 记账会把这段算成「新增字节」，这里扣回，保证 BytesWritten 等于真实文件长度。
-    bytes_written_ -= moov.size();
+    // 预留区剩余部分补一个 free box（payload 是开录时留下的零，不必重写）：
+    // 顶层 box 链必须首尾相接，留白字节不能被解析器当成数据。
+    if (shift == 0) {
+        const uint64_t leftover = faststart_reserve_ - moov.size();
+        if (leftover >= 8) {
+            std::vector<uint8_t> filler;
+            Put32(filler, static_cast<uint32_t>(leftover));
+            PutType(filler, "free");
+            if (!WriteRaw(filler.data(), filler.size())) {
+                return fail("write faststart filler failed");
+            }
+        }
+    }
+    // 这些写入都落在已存在的空隙里（预留区 / 搬移腾出的位置），文件总长不变：
+    // WriteRaw 记账会把它们算成「新增字节」，这里还原成真实文件长度。
+    bytes_written_ = data_end + shift;
+    faststart_close_us_ = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - faststart_begin).count());
 
     std::fflush(file_);
     std::fclose(file_);
