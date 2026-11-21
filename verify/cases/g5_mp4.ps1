@@ -1,14 +1,25 @@
-# 轮 48 起步 + 轮 49 收口：M3-09#1（MP4 faststart）/ M3-09#3（格式切换）判据
+# 轮 48 起步 + 轮 49 收口 + 轮 52 拆分：M3-09#1（MP4 faststart）/ M3-09#3（格式切换）判据
 #
 # 判据来自 `.codebuddy/plans/轮48指令.md` §P0-2 五条 + §P0-3 三条 +
-# `.codebuddy/plans/轮49指令.md` §P0-2（faststart 五条 + .part 语义），验收方可独立重跑。
+# `.codebuddy/plans/轮49指令.md` §P0-2（faststart 五条 + .part 语义）+
+# `.codebuddy/plans/轮52指令.md` §P0-1/§P1（预留回填 + 判据拆分），验收方可独立重跑。
 #   P0-2 #1 ffprobe format_name/duration  #2 ffmpeg 全片解码  #3 帧数=frames_encoded
 #          #4 音频时长 vs 视频末 PTS ≤100ms  #5 默认不带 --format 仍产 MKV
 #   轮 49  faststart：moov 偏移 < mdat 偏移 / moov 落在前 64KB / box 自检按前置口径
-#          .part 语义：录制期强杀 → .part 只剩 ftyp+mdat（无 moov）→ 判不可修复且保留
+#          .part 语义：录制期强杀 → .part 只剩 ftyp+free+mdat（无 moov）→ 判不可修复且保留
+#   轮 52  faststart 判据拆两条（F1-51 裁定，验收报告-轮51 §R3）：
+#          ① 通用门槛：moov 偏移 < mdat 偏移（与时长/文件大小无关）；
+#          ② 短素材启发式：**≤60s** 的样本要求 moov 结束于前 64KB（起播快的实测代理）；
+#             长素材（120s）只判 ①，并显式断言「moov 结束已在 64KB 之外」——
+#             证明 ② 不能当通用门槛（moov 体积随时长线性增长）。
+#          另加：预留命中（faststart_mode=reserve + 顶层 free 填充）、
+#                预留不足回退（--mp4-reserve 4096 → faststart_fallback=move，产物仍可播）。
 #   P0-3  状态序列一致 / 两容器均通过 1~4 / 非法值 exit 2 + usage
 # 附加护栏：MP4 的 box / sample table 自洽（verify/tools/mp4_box_check.py）、
 #           stss 首个同步样本为 1、--format mp4 未给 --out 时默认名跟随格式。
+#
+# 注：`--mp4-reserve` 是 SR_TEST_HOOKS=ON 的调试开关（交付包不含），
+#     本用例按 build-msvc（hooks ON）跑；用交付包 exe 跑会缺这条判据。
 #
 # Usage:
 #   pwsh -File verify/cases/g5_mp4.ps1 [-BuildDir build-msvc] [-Config Release]
@@ -86,6 +97,13 @@ function Field {
     if ($Text -match ("(?m)^" + [regex]::Escape($Name) + "=([^`r`n]*)")) { return $Matches[1].Trim() }
     return ''
 }
+# 轮 52：faststart_* 是打在一条 `[record] faststart_mode=... ...` 里的空格分隔键值，
+# 不是独立的 `key=value` 行，所以按「任意位置的 key=value」取。
+function FieldAny {
+    param([string]$Text, [string]$Name)
+    if ($Text -match ([regex]::Escape($Name) + "=([^\s`r`n]+)")) { return $Matches[1].Trim() }
+    return ''
+}
 function NumField {
     param([string]$Text, [string]$Name)
     $value = Field $Text $Name
@@ -133,8 +151,9 @@ function Count-VideoFrames {
     return -1
 }
 # 轮 49：顶层 box 扫描（只读文件头，不依赖 ffprobe）——faststart 判据要的是字节级偏移。
+# 轮 52：默认读 2MB —— 预留区（free box）可能就有几十 KB~几 MB，64KB 视野会把 mdat 挡在外面。
 function Get-TopBoxes {
-    param([string]$File, [int]$HeadBytes = 65536)
+    param([string]$File, [int]$HeadBytes = 2097152)
     $result = @()
     if (-not (Test-Path $File)) { return $result }
     $length = [Math]::Min($HeadBytes, (Get-Item $File).Length)
@@ -231,20 +250,98 @@ Assert 'r48-mp4-box-sample-table' ($boxResult.Fail -eq 0 -and $boxResult.Pass -g
     ("mp4_box_check.py RESULT: {0} PASS / {1} FAIL；原始输出 {2}" -f `
         $boxResult.Pass, $boxResult.Fail, 'box-check.txt')
 
-# ---------------- 轮 49 · P0-2 faststart（moov 前置） ----------------
-Write-Host '--- 轮 49 P0-2 faststart（moov 前置）---'
+# ---------------- 轮 49/52 · P0-2 faststart（moov 前置） ----------------
+Write-Host '--- 轮 49/52 P0-2 faststart（moov 前置 + 判据拆两条）---'
 $boxes = @(Get-TopBoxes -File $mp4)
 $boxSummary = ($boxes | ForEach-Object { "{0}@{1}+{2}" -f $_.Type, $_.Offset, $_.Size }) -join ' '
 $moovBox = $boxes | Where-Object { $_.Type -eq 'moov' } | Select-Object -First 1
 $mdatBox = $boxes | Where-Object { $_.Type -eq 'mdat' } | Select-Object -First 1
 $moovOffset = if ($moovBox) { $moovBox.Offset } else { -1 }
 $mdatOffset = if ($mdatBox) { $mdatBox.Offset } else { -1 }
-Assert 'r49-faststart-moov-before-mdat' ($moovOffset -ge 0 -and $mdatOffset -gt $moovOffset) `
-    ("顶层 box：{0}；moov_off={1} < mdat_off={2}" -f $boxSummary, $moovOffset, $mdatOffset)
+# ① 通用门槛（轮 52 拆分后）：moov 必须在 mdat 之前，与时长/文件大小无关。
+Assert 'r52-faststart-moov-before-mdat' ($moovOffset -ge 0 -and $mdatOffset -gt $moovOffset) `
+    ("顶层 box：{0}；moov_off={1} < mdat_off={2}（通用门槛）" -f $boxSummary, $moovOffset, $mdatOffset)
 
+# ② 短素材启发式（轮 52 拆分后）：≤60s 的样本要求 moov 结束于前 64KB。
 $moovEnd = if ($moovBox) { $moovBox.Offset + $moovBox.Size } else { -1 }
-Assert 'r49-faststart-moov-in-first-64k' ($moovEnd -gt 0 -and $moovEnd -le 65536) `
-    ("moov 结束偏移={0}（≤65536：前 64KB 内即可解析出容器头）；box 序列 {1}" -f $moovEnd, $boxSummary)
+Assert 'r52-faststart-short-moov-in-first-64k' ($seconds -le 60 -and $moovEnd -gt 0 -and $moovEnd -le 65536) `
+    ("{0}s 样本（≤60s 短素材）：moov 结束偏移={1}（≤65536）；box 序列 {2}" -f $seconds, $moovEnd, $boxSummary)
+
+# ③ 预留命中：日志声明 reserve + 预留区 ≥ moov + 顶层有 free 填充（不再搬 mdat）。
+$fsMode = FieldAny $mp4Run.Text 'faststart_mode'
+$fsReserve = [long](FieldAny $mp4Run.Text 'faststart_reserve')
+$fsMoov = [long](FieldAny $mp4Run.Text 'faststart_moov_bytes')
+$fsCloseUs = [long](FieldAny $mp4Run.Text 'faststart_close_us')
+$freeBox = $boxes | Where-Object { $_.Type -eq 'free' } | Select-Object -First 1
+Assert 'r52-faststart-reserve-hit' ($fsMode -eq 'reserve' -and $fsReserve -ge $fsMoov -and
+        $fsMoov -gt 0 -and $null -ne $freeBox -and $fsCloseUs -ge 0) `
+    ("faststart_mode={0} reserve={1}B moov={2}B 收尾={3}us；顶层 free={4}@+{5}（预留余量，播放器跳过）" -f `
+        $fsMode, $fsReserve, $fsMoov, $fsCloseUs,
+        ($null -ne $freeBox), $(if ($freeBox) { $freeBox.Size } else { '-' }))
+
+# ---------------- 轮 52 · P0-1 判据 #4：预留不足 → 回退搬移且产物可播 ----------------
+Write-Host '--- 轮 52 P0-1 回退路径（人为把预留调到 4KB）---'
+$fallbackMp4 = Join-Path $script:work 'r52-fallback.mp4'
+$fbRun = Invoke-Recorder -Arguments @('--record', '--seconds', "$seconds", '--fps', '30',
+    '--bitrate', '2000', '--format', 'mp4', '--mp4-reserve', '4096', '--out', "`"$fallbackMp4`"")
+$fbMode = FieldAny $fbRun.Text 'faststart_mode'
+$fbReserve = [long](FieldAny $fbRun.Text 'faststart_reserve')
+$fbMoov = [long](FieldAny $fbRun.Text 'faststart_moov_bytes')
+$fbBoxes = @(Get-TopBoxes -File $fallbackMp4)
+$fbSummary = ($fbBoxes | ForEach-Object { "{0}@{1}+{2}" -f $_.Type, $_.Offset, $_.Size }) -join ' '
+$fbMoovBox = $fbBoxes | Where-Object { $_.Type -eq 'moov' } | Select-Object -First 1
+$fbMdatBox = $fbBoxes | Where-Object { $_.Type -eq 'mdat' } | Select-Object -First 1
+$fbMoovOffset = if ($fbMoovBox) { $fbMoovBox.Offset } else { -1 }
+$fbMdatOffset = if ($fbMdatBox) { $fbMdatBox.Offset } else { -1 }
+Assert 'r52-faststart-fallback-log' ($fbRun.Exit -eq 0 -and $fbMode -eq 'move' -and
+        $fbReserve -eq 4096 -and $fbMoov -gt $fbReserve -and
+        $fbRun.Text -match 'faststart_fallback=move') `
+    ("exit={0} faststart_mode={1} reserve={2}B moov={3}B（moov > 预留 → 回退）；日志行含 faststart_fallback=move={4}" -f `
+        $fbRun.Exit, $fbMode, $fbReserve, $fbMoov, [bool]($fbRun.Text -match 'faststart_fallback=move'))
+$fbFmt = Probe-Json -File $fallbackMp4 -Entries 'format=format_name,duration'
+$fbDuration = if ($fbFmt) { [double]$fbFmt.format.duration } else { -1 }
+$fbDec = Decode-Clean -File $fallbackMp4
+$fbBoxRaw = python (Join-Path $root 'verify/tools/mp4_box_check.py') $fallbackMp4 2>&1 | Out-String
+$fbBoxResult = if ($fbBoxRaw -match 'RESULT:\s*(\d+)\s*PASS\s*/\s*(\d+)\s*FAIL') {
+    @{ Pass = [int]$Matches[1]; Fail = [int]$Matches[2] }
+} else { @{ Pass = 0; Fail = -1 } }
+Assert 'r52-faststart-fallback-playable' ($fbMoovOffset -ge 0 -and $fbMdatOffset -gt $fbMoovOffset -and
+        [Math]::Abs($fbDuration - $seconds) -le 0.2 -and
+        $fbDec.Exit -eq 0 -and $fbDec.Lines -eq 0 -and $fbBoxResult.Fail -eq 0) `
+    ("回退产物：box=[{0}]；moov_off={1} < mdat_off={2}；duration={3}s；ffmpeg error 行={4}；mp4_box_check {5} PASS/{6} FAIL" -f `
+        $fbSummary, $fbMoovOffset, $fbMdatOffset, $fbDuration, $fbDec.Lines,
+        $fbBoxResult.Pass, $fbBoxResult.Fail)
+
+# ---------------- 轮 52 · P1 判据拆分：长素材（120s）只判通用门槛 ----------------
+Write-Host '--- 轮 52 P1 长素材（120s）只判 moov 前置，不判前 64KB ---'
+$longSeconds = 120
+$longMp4 = Join-Path $script:work 'r52-long.mp4'
+$longRun = Invoke-Recorder -Arguments @('--record', '--seconds', "$longSeconds", '--fps', '30',
+    '--bitrate', '1000', '--format', 'mp4', '--out', "`"$longMp4`"") -WaitMs 300000
+$longBoxes = @(Get-TopBoxes -File $longMp4)
+$longSummary = ($longBoxes | ForEach-Object { "{0}@{1}+{2}" -f $_.Type, $_.Offset, $_.Size }) -join ' '
+$longMoov = $longBoxes | Where-Object { $_.Type -eq 'moov' } | Select-Object -First 1
+$longMdat = $longBoxes | Where-Object { $_.Type -eq 'mdat' } | Select-Object -First 1
+$longMoovOffset = if ($longMoov) { $longMoov.Offset } else { -1 }
+$longMdatOffset = if ($longMdat) { $longMdat.Offset } else { -1 }
+$longMoovEnd = if ($longMoov) { $longMoov.Offset + $longMoov.Size } else { -1 }
+$longFmt = Probe-Json -File $longMp4 -Entries 'format=format_name,duration'
+$longDuration = if ($longFmt) { [double]$longFmt.format.duration } else { -1 }
+$longDec = Decode-Clean -File $longMp4
+$longBoxRaw = python (Join-Path $root 'verify/tools/mp4_box_check.py') $longMp4 2>&1 | Out-String
+$longBoxResult = if ($longBoxRaw -match 'RESULT:\s*(\d+)\s*PASS\s*/\s*(\d+)\s*FAIL') {
+    @{ Pass = [int]$Matches[1]; Fail = [int]$Matches[2] }
+} else { @{ Pass = 0; Fail = -1 } }
+$longDetail = ("{0}s 素材：box=[{1}]；moov_off={2} < mdat_off={3}（通用门槛成立）；moov 结束={4} > 65536" +
+    "（短素材 64KB 启发式对长素材必然不成立，故不作通用门槛）；duration={5}s；ffmpeg error 行={6}；" +
+    "mp4_box_check {7} PASS/{8} FAIL（64KB 项按口径跳过）") -f `
+    $longSeconds, $longSummary, $longMoovOffset, $longMdatOffset, $longMoovEnd,
+    $longDuration, $longDec.Lines, $longBoxResult.Pass, $longBoxResult.Fail
+Assert 'r52-faststart-long-sample-generic-only' ($longRun.Exit -eq 0 -and
+        $longMoovOffset -ge 0 -and $longMdatOffset -gt $longMoovOffset -and
+        $longMoovEnd -gt 65536 -and [Math]::Abs($longDuration - $longSeconds) -le 0.5 -and
+        $longDec.Exit -eq 0 -and $longDec.Lines -eq 0 -and $longBoxResult.Fail -eq 0) `
+    $longDetail
 
 # ---------------- 轮 49 · P0-2 `.part` 语义（缓冲期崩溃 → 不可修复但保留） ----------------
 Write-Host '--- 轮 49 P0-2 .part 语义（录制期强杀）---'

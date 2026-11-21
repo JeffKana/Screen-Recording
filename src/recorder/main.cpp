@@ -93,6 +93,8 @@ struct Options {
     // 轮 47：--fail-encoder 的可选目标（hardware / software / all）；空 = 全部失败（既有语义）。
     std::string fail_encoder_target;
     uint64_t fail_write_after = 0;
+    // 轮 52（R2）：MP4 faststart 预留区字节数（0 = 按 --seconds/--fps 自动估算）。
+    uint64_t mp4_reserve_bytes = 0;
     bool fail_resume_backend = false;
     std::string fallback_dir;
     std::string control_pipe;
@@ -155,6 +157,7 @@ void PrintUsage() {
         "  --force-cpu             强制走既有 CPU 中转路径（M6-08#2 验收；验证的是既有降级能力）\n"
         "  --diag-window-test <file> 用合成日志验证诊断包「只留最近 10 分钟」的裁剪\n"
         "  --fail-resume / --fail-encoder [hardware|software|all] / --fail-write-after <n> / --fail-resume-backend\n"
+        "  --mp4-reserve <bytes>    人为指定 MP4 faststart 预留区（0=自动；调小可验证回退路径）\n"
         "  --fallback-dir <dir> / --fallback-commit <part>\n"
         "  --probe-repeat <n>    与 --list-encoders 合用：同进程重复探测 n 次（重试/泄漏护栏）\n");
 #endif
@@ -311,6 +314,9 @@ bool ParseArgs(int argc, char** argv, Options& options) {
             }
         } else if (std::strcmp(arg, "--fail-write-after") == 0 && i + 1 < argc) {
             options.fail_write_after = std::strtoull(argv[++i], nullptr, 10);
+        } else if (std::strcmp(arg, "--mp4-reserve") == 0 && i + 1 < argc) {
+            // 轮 52（R2）：人为指定 faststart 预留区字节数，用于验证回退路径（0 = 自动估算）。
+            options.mp4_reserve_bytes = std::strtoull(argv[++i], nullptr, 10);
         } else if (std::strcmp(arg, "--fail-resume-backend") == 0) {
             options.fail_resume_backend = true;
         } else if (std::strcmp(arg, "--inject-drop-every") == 0 && i + 1 < argc) {
@@ -825,6 +831,7 @@ int main(int argc, char** argv) {
     // M3-05：强制指定编码器（不可用 → 开录失败并给原因，走 exit 6）。
     record_options.encoder_id = options.encoder_id;
         record_options.fail_write_after = options.fail_write_after;
+        record_options.mp4_reserve_bytes = options.mp4_reserve_bytes;
         record_options.fail_resume_backend = options.fail_resume_backend;
         record_options.fallback_dir = options.fallback_dir;
         record_options.control_pipe = options.control_pipe;

@@ -60,6 +60,15 @@ public:
         mkv_.SetFailWriteAfter(writes);
         mp4_.SetFailWriteAfter(writes);
     }
+    // 轮 52（R2）：faststart 预留区的大小由「预计时长 × 帧率」估上界；MKV 不关心。
+    void SetFaststartReserve(uint64_t seconds, uint32_t fps, uint64_t override_bytes) {
+        mp4_.SetFaststartReserveHint(seconds, fps);
+        mp4_.SetFaststartReserveOverride(override_bytes);
+    }
+    uint64_t FaststartReserve() const { return mp4_.FaststartReserve(); }
+    uint64_t FaststartMoovBytes() const { return mp4_.FaststartMoovBytes(); }
+    uint64_t FaststartCloseMicros() const { return mp4_.FaststartCloseMicros(); }
+    bool FaststartFallback() const { return mp4_.FaststartFallback(); }
     bool Open(const std::string& path, std::string& error) {
         return IsMp4() ? mp4_.Open(path, error) : mkv_.Open(path, error);
     }
@@ -314,6 +323,8 @@ int RecordingSession::Run(const Options& options, Stats& stats, std::string& err
     }
     const std::string part_path = output_plan.part_path;
     muxer.SetFailWriteAfter(options.fail_write_after);
+    // 轮 52（R2）：按 --seconds/--fps 估 moov 上界，开录时先把位置占住（MP4 专用）。
+    muxer.SetFaststartReserve(options.seconds, options.fps, options.mp4_reserve_bytes);
     if (!muxer.Open(part_path, error)) {
         Log(std::string("muxer open failed: ") + error);
         return 7;
@@ -1288,6 +1299,13 @@ int RecordingSession::Run(const Options& options, Stats& stats, std::string& err
         if (fatal_code == 0) {
             fatal_code = 10;
         }
+    } else if (options.format == sr::mux::ContainerFormat::Mp4) {
+        // 轮 52（R2）：收尾走的是哪条路，必须能在日志里看见（判据 #4 靠 faststart_fallback=move 判定）。
+        Log("faststart_mode=" + std::string(muxer.FaststartFallback() ? "move" : "reserve") +
+            " faststart_reserve=" + std::to_string(muxer.FaststartReserve()) +
+            " faststart_moov_bytes=" + std::to_string(muxer.FaststartMoovBytes()) +
+            " faststart_close_us=" + std::to_string(muxer.FaststartCloseMicros()) +
+            (muxer.FaststartFallback() ? " faststart_fallback=move" : ""));
     }
 
     // 只有「数据完整性受损」（写盘出错或封装收尾失败）才需要截断修复；
