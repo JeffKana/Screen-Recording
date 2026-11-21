@@ -1,18 +1,19 @@
 # 录屏软件产品方案（Windows）
 
-> **当前版本：`0.1.0-rc.1`（V1.0 候选版，内部使用）** —— 功能已完整，真机兼容性与长稳验证仍在进行中。
-> 定位与口径见 `docs/23-V1.0-rc发布定位与口径.md`，已知限制见 `RELEASE-NOTES-0.1.0-rc.1.md`。
+> **当前版本：`0.1`（MVP，仅本机验证）** —— 功能已完整，**只在 Windows 11 + Intel 核显 + 单屏 100% 的单机环境验证**；
+> 其它机型、系统版本、缩放比例与多显卡组合**未测**（范围与例外见 `docs/27-0.1范围冻结与例外裁定.md`）。
+> **兼容性范围与已知限制见 `RELEASE-NOTES-0.1.0.md`**；1.0-GA 的门槛见 `docs/23 §4`（与 0.1 不是一套）。
 >
 > 平台：Windows 10 1903+ / Windows 11 · 工程代码在 `src/`，验收资产在 `verify/`，任务卡在 `tasks/`
 
-### 安装与升级（rc 期）
+### 安装与升级（0.1 期）
 
-- **首次安装**：解压 `ScreenRecorder-0.1.0-rc.<n>-win-x64.zip` 到任意目录，双击 `sr-ui.exe` 即用（免安装、无三方依赖）。
-- **rc 版本升级请先 uninstall 再 install**：不要直接在旧目录上覆盖解压。
+- **首次安装**：解压 `ScreenRecorder-0.1.0-win-x64.zip` 到任意目录，双击 `sr-ui.exe` 即用（免安装、无三方依赖）。
+- **版本升级请先 uninstall 再 install**：不要直接在旧目录上覆盖解压。
   - 先在旧包的目录里跑 `pwsh -File uninstall.ps1`（清掉 HKCU 卸载登记、开始菜单快捷方式与程序目录；
     默认**不删**用户成片，要连成片一起删才加 `-Purge`）；
   - 再解压新包，跑 `pwsh -File install.ps1`（默认装到 `%LOCALAPPDATA%\ScreenRecording`，免管理员）；
-  - 原因：rc 之间可能改注册表项名/快捷方式名/配置默认值，覆盖解压会留下新旧混合的残留项，
+  - 原因：版本之间可能改注册表项名/快捷方式名/配置默认值，覆盖解压会留下新旧混合的残留项，
     出问题时 `VERSION.txt` 与实际运行的二进制对不上。
 - **升级后核对版本**：`VERSION.txt` 的 `source_fingerprint` 应与 issue 里填的一致（`docs/23 §8`）。
 - **配置兼容**：`%LOCALAPPDATA%\sr-ui\config.ini` 升级时保留；新增键（如 `[output] container`）缺省即按默认值走。
