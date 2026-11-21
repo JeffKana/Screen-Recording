@@ -212,17 +212,42 @@ pwsh -File verify/cases/g5_lt02.ps1 -MuteSeconds 1800 -RecoverySeconds 30
 
 ### 4.2 LT-01 第 3 次（8h 单文件）
 
-<!-- FILL-LT01 -->
+```powershell
+pwsh -File verify/cases/g5_lt01_real.ps1        # 默认 -Seconds 28800 / -SampleSeconds 60
+# 产物目录：verify/artifacts/lt01-real-20261121-133707/
+```
+
+| 项 | 值 |
+| --- | --- |
+| 启动 | **2026-11-21 13:37:07**（脚本自动写 `verify/artifacts/.lt01-running.json`，副本镜像 `sr-recorder-lt01.exe`） |
+| 预计收尾 | **21:37 左右**（28800s + 收尾），`summary.json` 由脚本自动落盘 |
+| exe SHA256 | `2026BCCC6BE7E10E3B45C9D055D8DBD75D680FF1D57C7A9469BF965D45B21575`（与 §0 同一个 build-msvc Release 产物） |
+| 介质 | **NVMe SSD**（`D:` 为 NVMe 分区，可用 48.6GB ≥ 判据 35GB；AC 睡眠 = 0、显示器超时 = 0） |
+| 前置 | `.lt01-running.json` 不存在 → 已确认；无其它 `sr-recorder`/`sr-ui` 进程；8h 窗口内未跑任何其它录制/构建 |
+| 状态 | **交付时仍在运行 → 本轮不得据此判通过**（验收方可在收尾后按 `summary.json` 独立核） |
+
+> 六项判据（时长 / 内存 / 句柄 / 丢帧 / 16 点漂移 / 全片可播）与前两次同口径，由 `g5_lt01_real.ps1` 自动判定，
+> 原始输出在 `verify/artifacts/lt01-real-20261121-133707/{summary.json, samples.jsonl, lt01-8h.log}`。
+> **本文件不预填任何"通过"字样**——结果出来前，该项按「未出结果」计。
 
 ---
 
 ## §5 P1 issue 模板演练（R4）
 
 ```powershell
+$env:HTTPS_PROXY = "http://127.0.0.1:7890"   # 本机 git 走代理；gh 需显式给（F4-47 的同一环境问题）
 gh issue create --title "[drill] issue 模板演练（轮 52 R4，创建后即关闭）" --body "…"
+gh issue close 18 --comment "演练完成：模板字段与提交通路均可用，按约定关闭（轮 52 R4）。"
 ```
 
-<!-- FILL-DRILL -->
+| 项 | 结果 |
+| --- | --- |
+| 创建返回 | `https://github.com/JeffKana/Screen-Recording/issues/18` |
+| issue 号 | **#18** |
+| 关闭 | `gh issue view 18 --json number,title,state,createdAt,closedAt` → `{"closedAt":"2026-11-21T03:31:28Z","createdAt":"2026-11-21T03:31:21Z","number":18,"state":"CLOSED",...}` |
+
+> 阻塞说明：`gh` 默认不走本机代理（`git` 配了 `http://127.0.0.1:7890`），不加 `HTTPS_PROXY` 时
+> `api.github.com` 连接超时（与 `F4-47` 同源）。给代理后一次通过 —— 这条记在 `HANDOFF.md §3`。
 
 ---
 

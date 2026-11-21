@@ -86,5 +86,5 @@ pwsh -File verify/cases/g5_f342_repro.ps1     # F342-REPRO: 未复现（静默�
 - [x] 改动未超出文件域（`§1`）
 - [x] 接口无对外契约变更（`Mp4Writer` 是内部类；`--mp4-reserve` 是调试开关，`CONTRACT.md` 无需改）
 - [x] 文档已同步（`docs/07` 行 + 记录、`docs/22` 判据数字、`docs/26` 缺陷表）
-- [ ] **LT-01 第 3 次 8h 未出结果**（见 `HANDOFF.md §3`，不得计为通过）
-- [ ] **issue 模板演练未完成**（`gh` 无法连通 GitHub API，见 `HANDOFF.md §3`）
+- [x] issue 模板演练完成（`gh issue create` → **#18** → `gh issue close`；需显式给 `HTTPS_PROXY`）
+- [ ] **LT-01 第 3 次 8h 未出结果**（13:37:07 启动，预计 21:37；见 `HANDOFF.md §3`，不得计为通过）
