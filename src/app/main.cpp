@@ -17,6 +17,13 @@
 #include "app/Elevation.h"
 #include "app/FileOps.h"
 #include "app/RecorderController.h"
+#include "app/ui/app_state.h"
+#include "app/ui/controls.h"
+#include "app/ui/draw.h"
+#include "app/ui/ids.h"
+#include "app/ui/layout.h"
+#include "app/ui/theme.h"
+#include "app/ui/workbench.h"
 #include "core/state/RecorderState.h"
 #include "core/util/DiskEstimate.h"
 #include "core/util/PathProbe.h"
@@ -49,97 +56,16 @@
 #include <algorithm>
 #include <cwctype>
 
-namespace {
-
-constexpr const wchar_t* kWindowClass = L"SrUiMainWindow";
-constexpr const wchar_t* kSettingsClass = L"SrUiSettingsWindow";
-constexpr const wchar_t* kRegionOverlayClass = L"SrUiRegionOverlay";
-constexpr const wchar_t* kRegionEditorClass = L"SrUiRegionWindow";
-constexpr const wchar_t* kListClass = L"SrUiListWindow";
-constexpr const wchar_t* kAppTitle = L"Screen Recorder";
-constexpr UINT kTrayMessage = WM_APP + 1;
-constexpr UINT_PTR kPollTimer = 1;
-constexpr UINT_PTR kPreviewTimer = 2;
-constexpr UINT_PTR kExitTimer = 3;
-constexpr UINT kHotkeyStart = 1;
-constexpr UINT kHotkeyPause = 2;
-constexpr UINT kHotkeyStop = 3;
-
-constexpr int kStatusId = 200;
-constexpr int kStartButton = 201;
-constexpr int kPauseButton = 202;
-constexpr int kStopButton = 203;
-constexpr int kHideButton = 204;
-constexpr int kSavePathButton = 205;
-constexpr int kSettingsButton = 206;
-constexpr int kRegionButton = 207;
-constexpr int kListButton = 208;
-// M1-27：以管理员身份重启入口（主窗口按钮）。
-constexpr int kElevateButton = 209;
-// M1-27：UAC 提权窗口采集限制的常驻提示文本控件。
-constexpr int kUacWarnId = 210;
-
-constexpr int kRegionTextId = 600;
-constexpr int kRegionFull = 601;
-constexpr int kRegion169 = 602;
-constexpr int kRegion43 = 603;
-constexpr int kRegion11 = 604;
-constexpr int kRegionPick = 605;
-constexpr int kRegionOk = 606;
-constexpr int kRegionCancel = 607;
-
-constexpr int kTrayStart = 300;
-constexpr int kTrayPause = 301;
-constexpr int kTrayStop = 302;
-constexpr int kTrayOpenFolder = 303;
-constexpr int kTraySettings = 304;
-constexpr int kTrayShow = 305;
-constexpr int kTrayExit = 306;
-constexpr int kTrayToolbar = 307;
-constexpr int kTrayDiag = 308;
-constexpr int kTrayList = 309;
-// M1-27：托盘菜单里的「以管理员身份重启」。
-constexpr int kTrayElevate = 310;
-constexpr int kListView = 700;
-constexpr UINT_PTR kListTimer = 4;
-
-constexpr int kSettingsOk = 400;
-constexpr int kSettingsCancel = 401;
-constexpr int kSettingsBrowse = 402;
-constexpr int kSettingsTemplate = 103;
-// M3-03 / M3-04：帧率与码率模式
-constexpr int kSettingsFpsCombo = 104;
-constexpr int kSettingsFpsCustom = 105;
-constexpr int kSettingsRateCombo = 106;
-// M3-05：可用编码器列表（只读）
-constexpr int kSettingsEncoderList = 107;
-// M3-10：画质预设档位下拉（极致 / 高清 / 标准 / 省空间 / 自定义）。
-constexpr int kSettingsPresetCombo = 108;
-// M3-10#2：把当前预设的联动值显示在界面上（只读文本，验收可读取控件文本）。
-constexpr int kSettingsPresetValues = 109;
 // M3-03 的五个预设档；第 6 档「自定义」由编辑框给出 1~144。
 constexpr uint32_t kFpsPresets[5] = {15, 24, 25, 30, 60};
 
-constexpr const wchar_t* kToolbarClass = L"SrUiToolbar";
-// M1-27：UAC 提权窗口采集限制的提示文案（常驻标签 + 状态栏）。
-// 文案只说「可能」与「怎么办」：实测发现 WGC 在部分环境能采到高权限窗口内容，
-// 但兜底 PrintWindow 路径取不到帧——所以不能断言「一定黑屏」。
-constexpr const wchar_t* kUacWarnLabel = L"⚠ 当前非管理员运行：UAC 提权窗口等高权限窗口可能黑屏或无画面";
-constexpr const wchar_t* kUacWarnFull =
-    L"⚠ 当前非管理员运行：录制 UAC 提权窗口等高权限窗口时可能黑屏或无画面。"
-    L"请点「以管理员身份重启」后再录。";
-constexpr int kTbTimer = 500;
-constexpr int kTbRemaining = 501;
-constexpr int kTbPause = 502;
-constexpr int kTbStop = 503;
-constexpr int kTbHide = 504;
-constexpr int kTbMetrics = 505;
 
 bool g_log_enabled = false;
 int g_argc = 0;
 wchar_t** g_argv = nullptr;
 
-constexpr const wchar_t* kUiVersion = L"0.1.0";
+// 轮 55：版本号对外可读（状态栏与 --version 必须一致，不能在两处各写一份）。
+extern const wchar_t* const kUiVersion = L"0.1.0";
 
 // F3：测试注入开关（--preflight-fail / --set-*）由 SR_TEST_HOOKS 隔离。
 // 默认构建（含自动化验收）打开；G6 打包用 -DSR_TEST_HOOKS=OFF。
@@ -432,124 +358,7 @@ void SetHotkeyAt(sr::app::AppConfig& config, int index, const sr::app::HotkeyCom
     }
 }
 
-struct AppState {
-    HINSTANCE instance = nullptr;
-    HWND hwnd = nullptr;
-    sr::app::AppConfig config;
-    sr::app::RecorderController recorder;
-    std::wstring config_path;
-    std::wstring log_path;
-    std::wstring out_override;
-    std::wstring recorder_override;
-    std::wstring last_output;
-    std::wstring status_extra;
-    FILETIME config_write{};
-    bool have_config_write = false;
-    ULONGLONG next_config_check = 0;
-    bool hidden = false;
-    bool exit_on_stop = false;
-    bool preview_menu = false;
-    bool preview_done = false;
-    DWORD exit_timeout_ms = 0;
-    bool session_active = false;
-    bool settings_open = false;
-    bool tray_added = false;
-    bool registered[3] = {false, false, false};
-    ULONGLONG spawn_t = 0;
-    bool indicator_logged = false;
-    int exit_code = 0;
-    HICON icon_idle = nullptr;
-    HICON icon_active = nullptr;
-    NOTIFYICONDATAW nid{};
-    // M7-13：录制中状态提示。边框窗口为可选（--record-border off 关闭），
-    // indicator_state: 0=隐藏 / 1=录制中（红实线） / 2=暂停（黄虚线）。
-    HWND border_hwnd = nullptr;
-    bool show_record_border = true;
-    // -1 = 尚未结算过；保证首次（含「默认关闭」）也会输出一条 record_indicator 日志。
-    int indicator_state = -1;
-    // 验收注入：0=真实状态 / 1=录制中 / 2=暂停。走同一条 UI 渲染分支，
-    // 与 --simulate-backpressure 同族（M7-13 可见性断言的可重跑入口）。
-    int simulate_indicator_state = 0;
-
-    // M2-09：剩余可录时长（UI 本地探针，公式复用 core/util/DiskEstimate）。
-    uint64_t remaining_seconds = 0;
-    uint64_t disk_free_bytes = 0;
-    ULONGLONG next_disk_check = 0;
-    // M2-14：开录前自检。encoder 结果缓存，后续启动不再枚举 MFT。
-    std::wstring preflight_fail;
-    bool encoder_checked = false;
-    bool encoder_ok = false;
-    ULONGLONG last_preflight_ms = 0;
-    // M1-27：本进程是否已提权。非提权时给提示 + 「以管理员身份重启」入口。
-    bool elevated = false;
-    bool elevate_entry_shown = false;
-    // M8-03：磁盘水位提示（非阻塞提示线 / 强提示线，单位 MB）。
-    bool disk_warned = false;
-    bool disk_critical = false;
-    // M6-11#2 验收注入：模拟队列积压产生的丢帧数，走与真实丢帧相同的可见标识分支。
-    uint64_t backpressure_inject = 0;
-    // M1-04 / M1-05：区域框选与微调。
-    HWND region_overlay = nullptr;
-    HWND region_editor = nullptr;
-    sr::app::CaptureRegion region_edit;
-    bool region_selecting = false;
-    POINT region_start{};
-    RECT region_current{};
-    UINT region_dpi = 96;
-
-    // M2-08：录制中悬浮工具条。
-    HWND toolbar = nullptr;
-    HWND toolbar_timer = nullptr;
-    HWND toolbar_remaining = nullptr;
-    HWND toolbar_metrics = nullptr;
-    HWND toolbar_pause = nullptr;
-    HWND toolbar_stop = nullptr;
-    bool toolbar_user_hidden = false;
-
-    // M5-06：录制文件列表。
-    HWND list_window = nullptr;
-    ULONGLONG list_next_reload = 0;
-    int list_rows = 0;
-    bool show_list_on_start = false;
-    // M3-05：测试钩子——启动即打开设置页（验收脚本不必模拟点击托盘菜单）。
-    bool show_settings_on_start = false;
-    // M5-07：文件操作。测试钩子与菜单共用同一条实现，避免「验收路径 ≠ 产品路径」。
-    std::wstring list_op;
-    std::wstring list_from;
-    std::wstring list_to;
-    bool list_confirm_yes = false;
-    bool list_op_done = false;
-    std::wstring pending_rename_old;
-    std::wstring pending_rename_new;
-};
-
 AppState* g_app = nullptr;
-
-// M5-06：一行列表数据（来自 sr-recorder --list，state 为 recording 时由 UI 合成）。
-struct ListRow {
-    std::wstring name;
-    std::wstring state = L"complete";
-    uint64_t size = 0;
-    int64_t mtime_ms = 0;
-    int64_t duration_ms = 0;
-    uint32_t width = 0;
-    uint32_t height = 0;
-};
-
-struct SettingsContext {
-    AppState* app = nullptr;
-    HWND hwnd = nullptr;
-    HWND edits[3] = {nullptr, nullptr, nullptr};
-    HWND template_edit = nullptr;
-    HWND fps_combo = nullptr;
-    HWND fps_edit = nullptr;
-    HWND rate_combo = nullptr;
-    // M3-05：实际可用的编码器列表（只读）。
-    HWND encoder_list = nullptr;
-    // M3-10：画质预设档位下拉 + 当前联动值文本。
-    HWND preset_combo = nullptr;
-    HWND preset_values = nullptr;
-};
 
 void UpdateUi(AppState& app);
 void ApplyElevationUi(AppState& app);
@@ -819,128 +628,6 @@ void RefreshDiskRemaining(AppState& app) {
             app.config.disk_warn_mb);
     }
 }
-
-// M6-03：三项指标只做定点数还原与排版，数值全部来自 recorder 快照。
-std::wstring FormatMetrics(const sr::ipc::StateSnapshotPayload& snapshot) {
-    if (!snapshot.has_metrics) {
-        return {};
-    }
-    wchar_t buffer[128] = {};
-    std::swprintf(buffer, std::size(buffer), L"采集 %.1f / 编码 %.1f fps · 丢帧 %llu",
-                  static_cast<double>(snapshot.metrics.capture_fps_x100) / 100.0,
-                  static_cast<double>(snapshot.metrics.encode_fps_x100) / 100.0,
-                  static_cast<unsigned long long>(snapshot.metrics.frames_dropped));
-    return buffer;
-}
-
-void UpdateUi(AppState& app) {
-    if (app.hwnd == nullptr) {
-        return;
-    }
-    const bool active = app.recorder.Active();
-    const bool has_snapshot = app.recorder.HasSnapshot();
-    const sr::RecorderState state = has_snapshot
-                                        ? static_cast<sr::RecorderState>(app.recorder.Snapshot().state)
-                                        : sr::RecorderState::Idle;
-    bool recording = active && has_snapshot && state == sr::RecorderState::Recording;
-    bool paused = active && has_snapshot && state == sr::RecorderState::Paused;
-    // M7-13 验收注入：让状态提示走同一条渲染分支，便于不启录制也能重跑可见性断言。
-    if (app.simulate_indicator_state == 1) {
-        recording = true; paused = false;
-    } else if (app.simulate_indicator_state == 2) {
-        recording = false; paused = true;
-    }
-    const uint64_t elapsed = has_snapshot ? app.recorder.Snapshot().session_elapsed_ms : 0;
-    const std::wstring remaining = L"剩余可录 " + FormatElapsed(app.remaining_seconds * 1000);
-    const std::wstring region_mode = app.config.region.enabled()
-                                         ? L"区域 " + std::to_wstring(app.config.region.width) +
-                                               L"×" + std::to_wstring(app.config.region.height)
-                                         : L"全屏";
-
-    std::wstring status;
-    if (active) {
-        if (!has_snapshot) {
-            status = L"正在启动录制…  " + remaining + L"  ·  " + region_mode;
-        } else if (state == sr::RecorderState::Recording) {
-            const std::wstring metrics = FormatMetrics(app.recorder.Snapshot());
-            // 第一行：状态/计时/剩余/区域；第二行：三项指标 + 文件名。
-            // 定死的两行比让静态控件自动折行更稳（折行点会随 DPI 变）。
-            const std::wstring label = std::filesystem::path(app.last_output).filename().wstring();
-            status = L"录制中  " + FormatElapsed(elapsed) + L"  ·  " + remaining + L"  ·  " +
-                     region_mode + L"\n" +
-                     (metrics.empty() ? L"指标等待 recorder…" : metrics) + L"  ·  " + label;
-        } else if (state == sr::RecorderState::Paused) {
-            const std::wstring metrics = FormatMetrics(app.recorder.Snapshot());
-            const std::wstring label = std::filesystem::path(app.last_output).filename().wstring();
-            status = L"已暂停  " + FormatElapsed(elapsed) + L"（暂停不计时）  ·  " + remaining +
-                     L"  ·  " + region_mode + L"\n" +
-                     (metrics.empty() ? L"指标等待 recorder…" : metrics) + L"  ·  " + label;
-        } else if (state == sr::RecorderState::Stopping) {
-            status = L"正在收尾…  ·  " + remaining + L"  ·  " + region_mode;
-        } else {
-            status = L"录制会话进行中（" + Widen(sr::ToString(state)) + L"）  ·  " + remaining +
-                     L"  ·  " + region_mode;
-        }
-    } else if (app.recorder.Exited()) {
-        if (app.recorder.ExitCode() == 0) {
-            status = L"已保存: " + app.last_output;
-        } else {
-            status = L"Recorder 退出，code=" + std::to_wstring(app.recorder.ExitCode()) +
-                     L"（文件可能不可用）";
-        }
-    } else {
-        status = L"就绪。输出目录: " + app.config.output_dir + L"  ·  " + remaining + L"  ·  " +
-                 region_mode;
-    }
-    if (!app.status_extra.empty()) {
-        status += L"\n⚠ " + app.status_extra;
-    }
-    // M6-11#2：背压（队列积压）的可见标识。丢帧是积压的可观测信号；
-    // --simulate-backpressure 是测试注入手段（与 --preflight-fail 同族），
-    // 走的是**同一条 UI 渲染分支**，不是把日志文案冒充界面。
-    const uint64_t dropped_now = has_snapshot
-        ? static_cast<uint64_t>(app.recorder.Snapshot().metrics.frames_dropped) : 0;
-    const uint64_t effective_dropped = dropped_now + app.backpressure_inject;
-    if (effective_dropped > 0) {
-        status = L"⚠ 背压（丢帧 " + std::to_wstring(effective_dropped) + L"）  " + status;
-    }
-    // M8-03：磁盘提示放在第一行最前面——状态栏只有两行，追加到末尾会被挤出可视区。
-    if (app.disk_critical) {
-        status = L"⚠ 磁盘剩余不足 " + std::to_wstring(app.config.disk_critical_mb) +
-                 L"MB，录制将随时停止！  " + status;
-    } else if (app.disk_warned) {
-        status = L"⚠ 磁盘剩余不足 " + std::to_wstring(app.config.disk_warn_mb) + L"MB  " + status;
-    }
-
-    SetWindowTextW(GetDlgItem(app.hwnd, kStatusId), status.c_str());
-    EnableWindow(GetDlgItem(app.hwnd, kStartButton), !active);
-    EnableWindow(GetDlgItem(app.hwnd, kPauseButton), recording || paused);
-    EnableWindow(GetDlgItem(app.hwnd, kStopButton), active);
-    SetWindowTextW(GetDlgItem(app.hwnd, kPauseButton), paused ? L"继续" : L"暂停");
-
-    std::wstring tooltip = L"Screen Recorder — ";
-    if (recording) {
-        tooltip += L"录制中 " + FormatElapsed(elapsed);
-    } else if (paused) {
-        tooltip += L"已暂停 " + FormatElapsed(elapsed);
-    } else if (active) {
-        tooltip += L"启动中";
-    } else {
-        tooltip += L"就绪";
-    }
-    if (!app.status_extra.empty()) {
-        tooltip += L"（热键冲突）";
-    }
-    // M1-27：最小化到托盘后主窗口看不见了，提示要跟着托盘提示走。
-    if (!app.elevated) {
-        tooltip += L"（未提权：UAC 提权窗口可能黑屏）";
-    }
-    UpdateTray(app, tooltip, (recording || paused) ? app.icon_active : app.icon_idle);
-    UpdateRecordIndicator(app, recording, paused);
-    UpdateToolbar(app);
-    ApplyElevationUi(app);
-}
-
 // ---------------- M2-14：开录前自检 ----------------
 
 bool CheckDisplayPresent() {
@@ -1029,23 +716,6 @@ void RestartAsAdmin(AppState& app) {
         app.status_extra = L"以管理员身份重启失败：" + error;
     }
     UpdateUi(app);
-}
-
-// M1-27：提权提示的常驻标签与提权入口按钮（仅在未提权时可见）。
-void ApplyElevationUi(AppState& app) {
-    if (app.hwnd == nullptr) {
-        return;
-    }
-    HWND label = GetDlgItem(app.hwnd, kUacWarnId);
-    HWND button = GetDlgItem(app.hwnd, kElevateButton);
-    if (label != nullptr) {
-        SetWindowTextW(label, app.elevated ? L"" : kUacWarnLabel);
-        ShowWindow(label, app.elevated ? SW_HIDE : SW_SHOW);
-    }
-    if (button != nullptr) {
-        ShowWindow(button, app.elevated ? SW_HIDE : SW_SHOW);
-        EnableWindow(button, app.elevated ? FALSE : TRUE);
-    }
 }
 
 bool RunPreflight(AppState& app, std::wstring& error) {
@@ -1265,12 +935,6 @@ void OpenOutputFolder(AppState& app) {
     const std::filesystem::path path(app.last_output);
     const std::wstring folder = path.parent_path().wstring();
     ShellExecuteW(app.hwnd, L"open", folder.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-}
-
-void ShowMainWindow(AppState& app) {
-    ShowWindow(app.hwnd, SW_SHOW);
-    ShowWindow(app.hwnd, SW_RESTORE);
-    SetForegroundWindow(app.hwnd);
 }
 
 // ---------------- M8-14：一键导出诊断包 ----------------
@@ -2679,670 +2343,23 @@ bool RunRecorderEncoderList(AppState& app,
     return true;
 }
 
-std::wstring FormatBytes(uint64_t bytes) {
-    wchar_t buffer[64] = {};
-    if (bytes >= 1024ull * 1024ull * 1024ull) {
-        std::swprintf(buffer, std::size(buffer), L"%.2f GB",
-                      static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0));
-    } else if (bytes >= 1024ull * 1024ull) {
-        std::swprintf(buffer, std::size(buffer), L"%.1f MB",
-                      static_cast<double>(bytes) / (1024.0 * 1024.0));
-    } else {
-        std::swprintf(buffer, std::size(buffer), L"%llu KB",
-                      static_cast<unsigned long long>(bytes / 1024ull));
-    }
-    return buffer;
-}
-
-std::wstring FormatDurationMs(int64_t ms) {
-    if (ms <= 0) {
-        return L"--:--";
-    }
-    const int64_t total_seconds = ms / 1000;
-    wchar_t buffer[32] = {};
-    if (total_seconds >= 3600) {
-        std::swprintf(buffer, std::size(buffer), L"%lld:%02lld:%02lld",
-                      static_cast<long long>(total_seconds / 3600),
-                      static_cast<long long>((total_seconds / 60) % 60),
-                      static_cast<long long>(total_seconds % 60));
-    } else {
-        std::swprintf(buffer, std::size(buffer), L"%02lld:%02lld",
-                      static_cast<long long>(total_seconds / 60),
-                      static_cast<long long>(total_seconds % 60));
-    }
-    return buffer;
-}
-
-std::wstring FormatFileTimeMs(int64_t unix_ms) {
-    if (unix_ms <= 0) {
-        return L"--";
-    }
-    ULARGE_INTEGER value{};
-    value.QuadPart = static_cast<ULONGLONG>(unix_ms + 11644473600000LL) * 10000ull;
-    FILETIME file_time{};
-    file_time.dwLowDateTime = value.LowPart;
-    file_time.dwHighDateTime = value.HighPart;
-    SYSTEMTIME local{};
-    if (!FileTimeToSystemTime(&file_time, &local)) {
-        return L"--";
-    }
-    SYSTEMTIME display{};
-    if (!SystemTimeToTzSpecificLocalTime(nullptr, &local, &display)) {
-        display = local;
-    }
-    wchar_t buffer[32] = {};
-    std::swprintf(buffer, std::size(buffer), L"%04u-%02u-%02u %02u:%02u", display.wYear,
-                  display.wMonth, display.wDay, display.wHour, display.wMinute);
-    return buffer;
-}
-
-std::wstring ListStateText(const std::wstring& state) {
-    if (state == L"recording") {
-        return L"录制中";
-    }
-    if (state == L"recoverable") {
-        return L"可恢复";
-    }
-    if (state == L"broken") {
-        return L"不可恢复";
-    }
-    return L"已完成";
-}
-
-constexpr int kListColumns = 6;
-
-void FillListRow(HWND list, int index, const ListRow& row) {
-    const std::wstring cells[kListColumns] = {
-        row.name,
-        FormatDurationMs(row.duration_ms),
-        row.size > 0 ? FormatBytes(row.size) : std::wstring(L"--"),
-        (row.width > 0 && row.height > 0)
-            ? std::to_wstring(row.width) + L"×" + std::to_wstring(row.height)
-            : std::wstring(L"--"),
-        FormatFileTimeMs(row.mtime_ms),
-        ListStateText(row.state)};
-    for (int column = 0; column < kListColumns; ++column) {
-        if (column == 0) {
-            LVITEMW item{};
-            item.mask = LVIF_TEXT;
-            item.iItem = index;
-            item.iSubItem = 0;
-            item.pszText = const_cast<wchar_t*>(cells[column].c_str());
-            ListView_InsertItem(list, &item);
-        } else {
-            ListView_SetItemText(list, index, column,
-                                 const_cast<wchar_t*>(cells[column].c_str()));
-        }
-    }
-}
-
-void RefreshRecordingList(AppState& app) {
-    if (app.list_window == nullptr) {
-        return;
-    }
-    HWND list = GetDlgItem(app.list_window, kListView);
-    if (list == nullptr) {
-        return;
-    }
-    std::vector<ListRow> rows;
-    std::wstring error;
-    const bool ok = RunRecorderList(app, rows, error);
-    ListView_DeleteAllItems(list);
-
-    // 录制中的条目：文件还没落地，时长取 recorder 的媒体时间（暂停冻结）。
-    const bool active = app.recorder.Active();
-    int index = 0;
-    int64_t live_ms = 0;
-    if (active) {
-        ListRow live;
-        live.name = std::filesystem::path(app.last_output).filename().wstring() + L".part";
-        live.state = L"recording";
-        live.duration_ms = static_cast<int64_t>(app.recorder.Snapshot().session_elapsed_ms);
-        live_ms = live.duration_ms;
-        FillListRow(list, index++, live);
-        Log(L"list_entry idx=0 name=%ls state=recording size=0 duration_ms=%lld w=0 h=0",
-            live.name.c_str(), static_cast<long long>(live.duration_ms));
-        Log(L"list_live name=%ls duration_ms=%lld", live.name.c_str(),
-            static_cast<long long>(live.duration_ms));
-    }
-    for (const ListRow& row : rows) {
-        FillListRow(list, index++, row);
-        Log(L"list_entry idx=%d name=%ls state=%ls size=%llu duration_ms=%lld w=%u h=%u",
-            index - 1, row.name.c_str(), row.state.c_str(),
-            static_cast<unsigned long long>(row.size), static_cast<long long>(row.duration_ms),
-            row.width, row.height);
-    }
-    app.list_rows = index;
-    Log(L"list_reload ok=%d count=%d active=%d live_ms=%lld error=%ls", ok ? 1 : 0,
-        index, active ? 1 : 0, static_cast<long long>(live_ms), error.c_str());
-}
-
-void UpdateRecordingListLive(AppState& app) {
-    if (app.list_window == nullptr || !app.recorder.Active()) {
-        return;
-    }
-    HWND list = GetDlgItem(app.list_window, kListView);
-    if (list == nullptr) {
-        return;
-    }
-    const int64_t elapsed = static_cast<int64_t>(app.recorder.Snapshot().session_elapsed_ms);
-    const std::wstring text = FormatDurationMs(elapsed);
-    ListView_SetItemText(list, 0, 1, const_cast<wchar_t*>(text.c_str()));
-    const std::wstring name =
-        std::filesystem::path(app.last_output).filename().wstring() + L".part";
-    Log(L"list_live name=%ls duration_ms=%lld", name.c_str(), static_cast<long long>(elapsed));
-}
-
-// ---------------- M5-07：文件操作 ----------------
-
-std::vector<std::wstring> SplitListNames(const std::wstring& text) {
-    std::vector<std::wstring> names;
-    size_t start = 0;
-    while (start <= text.size()) {
-        const size_t end = text.find(L';', start);
-        std::wstring item =
-            text.substr(start, end == std::wstring::npos ? std::wstring::npos : end - start);
-        const size_t first = item.find_first_not_of(L" \t\r\n");
-        const size_t last = item.find_last_not_of(L" \t\r\n");
-        if (first != std::wstring::npos) {
-            item = item.substr(first, last - first + 1);
-            if (!item.empty()) {
-                names.push_back(item);
-            }
-        }
-        if (end == std::wstring::npos) {
-            break;
-        }
-        start = end + 1;
-    }
-    return names;
-}
-
-void PerformRename(AppState& app, const std::wstring& old_name, const std::wstring& new_name) {
-    std::wstring path;
-    std::wstring error;
-    const bool ok = sr::app::RenameRecording(app.config.output_dir, old_name, new_name, path, error);
-    Log(L"file_op op=rename ok=%d old=%ls new=%ls path=%ls error=%ls", ok ? 1 : 0,
-        old_name.c_str(), new_name.c_str(), ok ? path.c_str() : L"", error.c_str());
-    if (ok) {
-        RefreshRecordingList(app);
-    }
-}
-
-void PerformDelete(AppState& app,
-                   const std::vector<std::wstring>& names,
-                   bool confirmed) {
-    if (names.empty()) {
-        Log(L"file_op op=delete ok=0 count=0 confirm=%d error=empty", confirmed ? 1 : 0);
-        return;
-    }
-    if (!confirmed) {
-        // 批量删除的二次确认被取消：不改磁盘，只留日志供验收断言。
-        Log(L"file_op op=delete ok=0 count=%zu confirm=0", names.size());
-        return;
-    }
-    std::vector<std::wstring> paths;
-    paths.reserve(names.size());
-    for (const std::wstring& name : names) {
-        paths.push_back((std::filesystem::path(app.config.output_dir) / name).wstring());
-    }
-    std::wstring error;
-    const bool ok = sr::app::DeleteToRecycleBin(paths, error);
-    Log(L"file_op op=delete ok=%d count=%zu confirm=1 recycle=%d error=%ls", ok ? 1 : 0,
-        names.size(), ok ? 1 : 0, error.c_str());
-    if (ok) {
-        RefreshRecordingList(app);
-    }
-}
-
-void RunPendingListOp(AppState& app) {
-    app.list_op_done = true;
-    if (app.list_op == L"rename") {
-        PerformRename(app, app.list_from, app.list_to);
-    } else if (app.list_op == L"delete") {
-        PerformDelete(app, SplitListNames(app.list_from), app.list_confirm_yes);
-    } else {
-        Log(L"file_op op=%ls ok=0 error=unknown_op", app.list_op.c_str());
-    }
-}
-
-std::vector<std::wstring> SelectedListNames(HWND list) {
-    std::vector<std::wstring> names;
-    for (int index = ListView_GetNextItem(list, -1, LVNI_SELECTED); index >= 0;
-         index = ListView_GetNextItem(list, index, LVNI_SELECTED)) {
-        wchar_t text[MAX_PATH] = {};
-        ListView_GetItemText(list, index, 0, text, static_cast<int>(std::size(text)));
-        names.push_back(text);
-    }
-    return names;
-}
-
-void ShowListContextMenu(AppState& app, int x, int y) {
-    HWND list = GetDlgItem(app.list_window, kListView);
-    if (list == nullptr) {
-        return;
-    }
-    const std::vector<std::wstring> names = SelectedListNames(list);
-    if (names.empty()) {
-        return;
-    }
-    HMENU menu = CreatePopupMenu();
-    AppendMenuW(menu, MF_STRING, 1, L"重命名");
-    AppendMenuW(menu, MF_STRING, 2, L"删除到回收站");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, 3, L"打开所在目录");
-    AppendMenuW(menu, MF_STRING, 4, L"复制路径");
-    const int command =
-        TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y, 0, app.list_window, nullptr);
-    DestroyMenu(menu);
-    if (command == 0) {
-        return;
-    }
-    const std::wstring path =
-        (std::filesystem::path(app.config.output_dir) / names.front()).wstring();
-    if (command == 1) {
-        if (names.size() != 1) {
-            MessageBoxW(app.list_window, L"重命名一次只能选一个文件", L"重命名", MB_ICONINFORMATION);
-            return;
-        }
-        ListView_EditLabel(list, ListView_GetNextItem(list, -1, LVNI_SELECTED));
-        return;
-    }
-    if (command == 2) {
-        const std::wstring prompt = names.size() > 1
-                                        ? L"确认把这 " + std::to_wstring(names.size()) +
-                                              L" 个文件删除到回收站？"
-                                        : L"确认把 " + names.front() + L" 删除到回收站？";
-        if (MessageBoxW(app.list_window, prompt.c_str(), L"删除确认",
-                        MB_ICONQUESTION | MB_YESNO) == IDYES) {
-            PerformDelete(app, names, true);
-        } else {
-            PerformDelete(app, names, false);
-        }
-        return;
-    }
-    if (command == 3) {
-        std::wstring error;
-        if (!sr::app::RevealInExplorer(path, error)) {
-            MessageBoxW(app.list_window, error.c_str(), L"打开失败", MB_ICONWARNING);
-        }
-        return;
-    }
-    if (command == 4) {
-        std::wstring error;
-        if (sr::app::CopyPathToClipboard(path, error)) {
-            Log(L"file_op op=copy_path ok=1 path=%ls", path.c_str());
-        } else {
-            Log(L"file_op op=copy_path ok=0 error=%ls", error.c_str());
-        }
-    }
-}
-
-LRESULT CALLBACK ListProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
-    AppState* app = g_app;
-    switch (message) {
-        case WM_CREATE: {
-            HWND list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
-                                        WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SHOWSELALWAYS |
-                                            LVS_EDITLABELS,
-                                        12, 12, 736, 400, hwnd, ControlId(kListView),
-                                        app->instance, nullptr);
-            ListView_SetExtendedListViewStyle(list,
-                                              LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
-            const wchar_t* headers[kListColumns] = {L"文件名", L"时长", L"大小",
-                                                    L"分辨率", L"录制时间", L"状态"};
-            const int widths[kListColumns] = {300, 90, 100, 100, 150, 90};
-            for (int column = 0; column < kListColumns; ++column) {
-                LVCOLUMNW info{};
-                info.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
-                info.pszText = const_cast<wchar_t*>(headers[column]);
-                info.cx = widths[column];
-                info.iSubItem = column;
-                ListView_InsertColumn(list, column, &info);
-            }
-            app->list_window = hwnd;
-            app->list_next_reload = 0;
-            RefreshRecordingList(*app);
-            if (!app->list_op.empty() && !app->list_op_done) {
-                RunPendingListOp(*app);
-            }
-            SetTimer(hwnd, kListTimer, 1000, nullptr);
-            Log(L"list_open dir=%ls", app->config.output_dir.c_str());
-            return 0;
-        }
-        case WM_APP + 1: {
-            if (app != nullptr && !app->pending_rename_old.empty()) {
-                PerformRename(*app, app->pending_rename_old, app->pending_rename_new);
-                app->pending_rename_old.clear();
-                app->pending_rename_new.clear();
-            }
-            return 0;
-        }
-        case WM_CONTEXTMENU: {
-            HWND list = GetDlgItem(hwnd, kListView);
-            if (reinterpret_cast<HWND>(wparam) == list) {
-                POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
-                if (point.x == -1 && point.y == -1) {
-                    GetCursorPos(&point);
-                }
-                ShowListContextMenu(*app, point.x, point.y);
-                return 0;
-            }
-            break;
-        }
-        case WM_NOTIFY: {
-            const auto* header = reinterpret_cast<NMHDR*>(lparam);
-            if (header != nullptr && header->idFrom == kListView &&
-                header->code == LVN_ENDLABELEDIT) {
-                auto* display = reinterpret_cast<NMLVDISPINFOW*>(lparam);
-                if (display->item.pszText == nullptr) {
-                    return TRUE;  // 用户取消
-                }
-                HWND list = GetDlgItem(hwnd, kListView);
-                wchar_t old_name[MAX_PATH] = {};
-                ListView_GetItemText(list, display->item.iItem, 0, old_name,
-                                     static_cast<int>(std::size(old_name)));
-                const std::wstring new_name = display->item.pszText;
-                if (new_name != old_name) {
-                    // 在通知里刷新 ListView 会踩到控件自己的编辑状态；转成异步消息再改。
-                    app->pending_rename_old = old_name;
-                    app->pending_rename_new = new_name;
-                    PostMessageW(hwnd, WM_APP + 1, 0, 0);
-                }
-                return FALSE;  // 不直接改 label，由刷新后的真实列表决定
-            }
-            break;
-        }
-        case WM_TIMER: {
-            if (wparam == kListTimer) {
-                const ULONGLONG now = GetTickCount64();
-                if (now >= app->list_next_reload) {
-                    app->list_next_reload = now + (app->recorder.Active() ? 5000 : 3000);
-                    RefreshRecordingList(*app);
-                } else {
-                    UpdateRecordingListLive(*app);
-                }
-                return 0;
-            }
-            break;
-        }
-        case WM_SIZE: {
-            HWND list = GetDlgItem(hwnd, kListView);
-            if (list != nullptr) {
-                RECT client{};
-                GetClientRect(hwnd, &client);
-                SetWindowPos(list, nullptr, 12, 12, client.right - 24, client.bottom - 24,
-                             SWP_NOZORDER);
-            }
-            return 0;
-        }
-        case WM_CLOSE: {
-            KillTimer(hwnd, kListTimer);
-            app->list_window = nullptr;
-            DestroyWindow(hwnd);
-            return 0;
-        }
-        case WM_DESTROY: {
-            app->list_window = nullptr;
-            return 0;
-        }
-        default:
-            break;
-    }
-    return DefWindowProcW(hwnd, message, wparam, lparam);
-}
-
-void ShowRecordingList(AppState& app) {
-    if (app.list_window != nullptr) {
-        ShowWindow(app.list_window, SW_SHOW);
-        SetForegroundWindow(app.list_window);
-        RefreshRecordingList(app);
-        return;
-    }
-    HWND window = CreateWindowExW(WS_EX_TOOLWINDOW, kListClass, L"录制文件列表",
-                                  WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX, CW_USEDEFAULT,
-                                  CW_USEDEFAULT, 780, 470, app.hwnd, nullptr, app.instance,
-                                  nullptr);
-    if (window == nullptr) {
-        Log(L"list_open_failed error=%lu", GetLastError());
-        return;
-    }
-    ShowWindow(window, SW_SHOW);
-    UpdateWindow(window);
-}
-
-// ---------------- 主窗口 ----------------
-
-LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
-    AppState* app = g_app;
-    switch (message) {
-        case WM_CREATE: {
-            app->hwnd = hwnd;
-            HWND status = CreateWindowExW(0, L"STATIC", L"就绪", WS_CHILD | WS_VISIBLE | SS_LEFT,
-                                         16, 14, 470, 46, hwnd,
-                                         ControlId(kStatusId), app->instance, nullptr);
-            SendMessageW(status, WM_SETFONT,
-                         reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), TRUE);
-            const wchar_t* labels[3] = {L"开始录制", L"暂停", L"停止"};
-            const int ids[3] = {kStartButton, kPauseButton, kStopButton};
-            for (int i = 0; i < 3; ++i) {
-                HWND button = CreateWindowExW(0, L"BUTTON", labels[i],
-                                              WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                              16 + i * 120, 78, 110, 32, hwnd,
-                                              ControlId(ids[i]), app->instance, nullptr);
-                SendMessageW(button, WM_SETFONT,
-                             reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), TRUE);
-            }
-            HWND hide = CreateWindowExW(0, L"BUTTON", L"最小化到托盘",
-                                        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                        376, 78, 110, 32, hwnd,
-                                        ControlId(kHideButton), app->instance, nullptr);
-            SendMessageW(hide, WM_SETFONT,
-                         reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), TRUE);
-
-            const wchar_t* tools[4] = {L"保存路径…", L"设置…", L"区域…", L"录制列表…"};
-            const int tool_ids[4] = {kSavePathButton, kSettingsButton, kRegionButton, kListButton};
-            for (int i = 0; i < 4; ++i) {
-                HWND button = CreateWindowExW(0, L"BUTTON", tools[i],
-                                              WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                              16 + i * 120, 120, 110, 28, hwnd,
-                                              ControlId(tool_ids[i]), app->instance, nullptr);
-                SendMessageW(button, WM_SETFONT,
-                             reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), TRUE);
-            }
-
-            // M1-27：提权限制常驻提示 + 「以管理员身份重启」入口。
-            // 提示常驻可见 → 开录前与录制中都在（状态栏只有两行，塞不下第三条）。
-            HWND warn = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | SS_LEFT,
-                                         16, 152, 336, 32, hwnd,
-                                         ControlId(kUacWarnId), app->instance, nullptr);
-            SendMessageW(warn, WM_SETFONT,
-                         reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), TRUE);
-            HWND elevate = CreateWindowExW(0, L"BUTTON", L"以管理员身份重启",
-                                           WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                           360, 152, 130, 28, hwnd,
-                                           ControlId(kElevateButton), app->instance, nullptr);
-            SendMessageW(elevate, WM_SETFONT,
-                         reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), TRUE);
-
-            app->icon_idle = LoadIconW(nullptr, IDI_APPLICATION);
-            // M7-13#1：录制/暂停态用自绘「带红点」图标，而非系统信息图标。
-            app->icon_active = MakeRedDotIcon();
-            if (app->icon_active == nullptr) {
-                app->icon_active = LoadIconW(nullptr, IDI_INFORMATION);
-            }
-            app->border_hwnd = CreateBorderWindow(app->instance);
-            UpdateTray(*app, L"Screen Recorder — 就绪", app->icon_idle);
-            RegisterHotkeys(*app, true);
-            SetTimer(hwnd, kPollTimer, 50, nullptr);
-            if (app->exit_timeout_ms > 0) {
-                SetTimer(hwnd, kExitTimer, app->exit_timeout_ms, nullptr);
-            }
-            RefreshDiskRemaining(*app);
-            app->next_disk_check = GetTickCount64() + 1000;
-            Log(L"app_ready pid=%lu", static_cast<unsigned long>(GetCurrentProcessId()));
-            UpdateUi(*app);
-            if (app->show_list_on_start) {
-                // 测试钩子：启动即打开列表，验收脚本不必模拟点击。
-                PostMessageW(hwnd, WM_COMMAND, static_cast<WPARAM>(kListButton), 0);
-            }
-            if (app->show_settings_on_start) {
-                // 测试钩子（M3-05）：启动即打开设置页，验收脚本直接读编码器列表。
-                PostMessageW(hwnd, WM_COMMAND, static_cast<WPARAM>(kSettingsButton), 0);
-            }
-            return 0;
-        }
-        case WM_COMMAND: {
-            switch (LOWORD(wparam)) {
-                case kStartButton: StartRecording(*app); break;
-                case kPauseButton: PauseResume(*app); break;
-                case kStopButton: StopRecording(*app); break;
-                case kHideButton:
-                    ShowWindow(hwnd, SW_HIDE);
-                    Log(L"minimized_to_tray");
-                    break;
-                case kSavePathButton: BrowseOutputDir(*app); break;
-                case kSettingsButton: ShowSettings(*app); break;
-                case kRegionButton: ShowRegionEditor(*app); break;
-                case kListButton: ShowRecordingList(*app); break;
-                case kTrayList: ShowRecordingList(*app); break;
-                case kElevateButton: RestartAsAdmin(*app); break;
-                case kTrayToolbar: ToggleToolbar(*app); break;
-                case kTrayElevate: RestartAsAdmin(*app); break;
-                default: break;
-            }
-            return 0;
-        }
-        case WM_HOTKEY: {
-            // 轮 35 / F2：标题可能为空（桌面、无标题窗口），不能作为「是否失焦」的判据。
-            // 同时记录 HWND，验收用 `foreground_hwnd != 主窗口 HWND` 判定；标题只作日志。
-            const HWND foreground_hwnd = GetForegroundWindow();
-            wchar_t foreground[256] = {};
-            GetWindowTextW(foreground_hwnd, foreground, static_cast<int>(std::size(foreground)));
-            Log(L"hotkey id=%llu foreground=%ls foreground_hwnd=%llu",
-                static_cast<unsigned long long>(wparam), foreground,
-                static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(foreground_hwnd)));
-            if (wparam == kHotkeyStart) {
-                StartRecording(*app);
-            } else if (wparam == kHotkeyPause) {
-                PauseResume(*app);
-            } else if (wparam == kHotkeyStop) {
-                StopRecording(*app);
-            }
-            return 0;
-        }
-        case WM_TIMER: {
-            if (wparam == kPollTimer) {
-                app->recorder.Poll();
-                if (GetTickCount64() >= app->next_config_check) {
-                    app->next_config_check = GetTickCount64() + 1000;
-                    ReloadConfigIfChanged(*app);
-                }
-                if (GetTickCount64() >= app->next_disk_check) {
-                    app->next_disk_check = GetTickCount64() + 1000;
-                    RefreshDiskRemaining(*app);
-                }
-                if (app->session_active && !app->recorder.Active()) {
-                    app->session_active = false;
-                    ShowToolbar(*app, false);
-                    const DWORD code = app->recorder.ExitCode();
-                    const bool exists = std::filesystem::exists(app->last_output);
-                    Log(L"session_end exit=%lu output_exists=%d out=%ls", code, exists ? 1 : 0,
-                        app->last_output.c_str());
-                    app->exit_code = (code == 0 && exists) ? 0 : 1;
-                    if (app->exit_on_stop) {
-                        Log(L"auto_exit code=%d", app->exit_code);
-                        PostMessageW(hwnd, WM_CLOSE, 0, 0);
-                    }
-                }
-                UpdateUi(*app);
-                return 0;
-            }
-            if (wparam == kPreviewTimer) {
-                KillTimer(hwnd, kPreviewTimer);
-                Log(L"preview_tray_menu");
-                ShowTrayMenu(*app);
-                return 0;
-            }
-            if (wparam == kExitTimer) {
-                KillTimer(hwnd, kExitTimer);
-                Log(L"exit_timer_fired");
-                PostMessageW(hwnd, WM_CLOSE, 0, 0);
-                return 0;
-            }
-            break;
-        }
-        case kTrayMessage: {
-            const UINT notification = LOWORD(lparam);
-            if (notification == WM_RBUTTONUP || notification == WM_CONTEXTMENU) {
-                ShowTrayMenu(*app);
-            } else if (notification == WM_LBUTTONDBLCLK) {
-                ShowMainWindow(*app);
-            }
-            return 0;
-        }
-        case WM_SIZE: {
-            if (wparam == SIZE_MINIMIZED) {
-                ShowWindow(hwnd, SW_HIDE);
-                Log(L"minimized_to_tray");
-            }
-            return 0;
-        }
-        case WM_CLOSE: {
-            if (app->recorder.Active()) {
-                app->recorder.Shutdown();
-                const DWORD code = app->recorder.ExitCode();
-                const bool exists = std::filesystem::exists(app->last_output);
-                app->exit_code = (code == 0 && exists) ? 0 : 1;
-                Log(L"shutdown_done exit=%lu output_exists=%d", code, exists ? 1 : 0);
-            }
-            RemoveTray(*app);
-            if (app->region_overlay != nullptr) {
-                DestroyWindow(app->region_overlay);
-            }
-            if (app->region_editor != nullptr) {
-                DestroyWindow(app->region_editor);
-            }
-            if (app->toolbar != nullptr) {
-                DestroyWindow(app->toolbar);
-            }
-            DestroyWindow(hwnd);
-            return 0;
-        }
-        case WM_DESTROY: {
-            KillTimer(hwnd, kPollTimer);
-            UnregisterHotkeys(*app);
-            RemoveTray(*app);
-            if (app->region_overlay != nullptr) {
-                DestroyWindow(app->region_overlay);
-            }
-            if (app->region_editor != nullptr) {
-                DestroyWindow(app->region_editor);
-            }
-            if (app->toolbar != nullptr) {
-                DestroyWindow(app->toolbar);
-            }
-            Log(L"app_exit code=%d", app->exit_code);
-            PostQuitMessage(app->exit_code);
-            return 0;
-        }
-        default:
-            break;
-    }
-    return DefWindowProcW(hwnd, message, wparam, lparam);
-}
-
 bool RegisterClasses(HINSTANCE instance) {
+    // 轮 55：主窗口全自绘（Header/卡片/状态栏 + 自绘控件），不注册背景刷子，
+    // 从构造上排除 WM_ERASEBKGND 的系统灰底白闪。
     WNDCLASSEXW main_class{};
     main_class.cbSize = sizeof(main_class);
     main_class.lpfnWndProc = MainProc;
     main_class.hInstance = instance;
     main_class.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    main_class.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    main_class.hbrBackground = nullptr;
     main_class.lpszClassName = kWindowClass;
     main_class.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
     main_class.hIconSm = main_class.hIcon;
     if (RegisterClassExW(&main_class) == 0) {
+        return false;
+    }
+    // 自绘控件窗口类（Button/Toggle/Field/Label/Pill）。
+    if (!sr::ui::RegisterControlClasses(instance)) {
         return false;
     }
 
@@ -3420,6 +2437,7 @@ void PrintUsage() {
         L"        [--log-level debug|info|warn（重启生效）] [--recorder <exe>]\n"
         L"        [--exit-on-stop] [--exit-after-ms <n>] [--preview-tray-menu]\n"
         L"        [--record-border on|off 录制中屏幕边框，默认 on（M7-13）]\n"
+        L"        [--theme dark|light 工作台主题，默认 dark（轮 55）]\n"
         L"  sr-ui --export-diag <dir> [--config <ini>] [--log <log>]\n"
         L"  sr-ui --version | --help\n",
         kUiVersion);
@@ -3437,6 +2455,7 @@ void PrintUsage() {
         L"  sr-ui --simulate-backpressure <n> 注入丢帧以验证背压可见标识（M6-11#2）\n"
         L"  sr-ui --list-op <rename|delete> --list-from <name[;name]> [--list-to <name>]\n"
         L"        [--list-confirm yes|no]  （复用列表菜单的同一条文件操作实现）\n"
+        L"  sr-ui --dpi-scale <factor>  （注入 DPI 缩放，如 1.25；ui_theme 用例用）\n"
         L"  sr-ui --elevate-dry-run  （只构造「以管理员身份重启」的命令行并打印，不执行）\n"
         L"  sr-ui --elevate-launch  （真实发起提权请求；UAC 对话框由系统弹出、由用户确认）\n");
 #endif
@@ -3508,7 +2527,6 @@ bool SetHotkeyCommand(const std::wstring& action,
     return sr::app::SaveHotkey(config_path, action, combo, error);
 }
 
-}  // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     g_argc = 0;
@@ -3545,6 +2563,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     bool show_settings = false;
     std::wstring log_level_text;
     std::wstring export_diag_dir;
+    // 轮 55：主题与 DPI 缩放（--theme dark|light；--dpi-scale 只给验收用例用）。
+    std::wstring theme_text;
+    double dpi_scale = 0.0;
     bool help = false;
     bool show_version = false;
     // M1-27：提权相关的测试钩子（只在 SR_TEST_HOOKS 构建里存在）。
@@ -3579,6 +2600,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         } else if (arg == L"--record-border") {
             std::wstring value;
             if (take(value) && value == L"off") { show_record_border = false; }
+        } else if (arg == L"--theme") {
+            // 轮 55：主题切换入口（dark|light，默认 dark）。非法值保留默认并记日志。
+            take(theme_text);
         } else if (arg == L"--exit-on-stop") {
             exit_on_stop = true;
         } else if (arg == L"--preview-tray-menu") {
@@ -3635,6 +2659,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         } else if (arg == L"--elevate-launch") {
             // M1-27：真实发起提权请求（UAC 对话框由系统弹出、由用户确认）。
             elevate_launch = true;
+        } else if (arg == L"--dpi-scale") {
+            // 轮 55：DPI 缩放注入（120dpi 模拟），只为 ui_theme 用例提供可重跑入口；
+            // 真实缩放仍由 WM_DPICHANGED + GetDpiForWindow 决定。
+            std::wstring value;
+            if (take(value)) {
+                dpi_scale = std::wcstod(value.c_str(), nullptr);
+                if (dpi_scale < 0.5 || dpi_scale > 4.0) {
+                    dpi_scale = 0.0;
+                }
+            }
 #endif
         } else if (arg == L"--help" || arg == L"-h") {
             help = true;
@@ -3939,6 +2973,23 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (!SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
         SetProcessDPIAware();
     }
+    // 轮 55：GDI+ 自绘 + 主题 + DPI（--theme / --dpi-scale 在创建窗口前生效，
+    // 避免先按旧 token 画一帧再切主题的闪烁）。
+    sr::ui::InitializeGdiplus();
+    if (!theme_text.empty()) {
+        sr::ui::ThemeKind kind = sr::ui::ThemeKind::Dark;
+        if (sr::ui::ParseTheme(theme_text, kind)) {
+            sr::ui::SetTheme(kind);
+        } else {
+            LogWarn(L"theme_rejected value=%ls fallback=dark", theme_text.c_str());
+        }
+    }
+    sr::ui::SetDpi(GetDpiForSystem());
+    sr::ui::SetScaleOverride(dpi_scale);
+    Log(L"ui_theme_init theme=%ls dpi=%u scale=%.2f header_h=%d status_h=%d panel_w=%d",
+        sr::ui::Current().name, sr::ui::Dpi(), sr::ui::ScaleFactor(),
+        sr::ui::Scale(sr::ui::Current().header_h), sr::ui::Scale(sr::ui::Current().status_h),
+        sr::ui::Scale(sr::ui::Current().panel_w));
 
     int result = 0;
     {
@@ -3997,9 +3048,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             return 1;
         }
 
-        HWND hwnd = CreateWindowExW(0, kWindowClass, kAppTitle, WS_OVERLAPPEDWINDOW,
-                                    CW_USEDEFAULT, CW_USEDEFAULT, 520, 230,
-                                    nullptr, nullptr, instance, nullptr);
+        // 轮 55：工作台骨架 980×680（最小 860×560，见 WM_GETMINMAXINFO）。
+        // WS_EX_COMPOSITED：整窗双缓冲，resize 时先画到后台缓冲再整块提交，避免白闪；
+        // WS_EX_CONTROLPARENT：子控件之间的 Tab 换焦点由 IsDialogMessage 处理。
+        HWND hwnd = CreateWindowExW(WS_EX_COMPOSITED | WS_EX_CONTROLPARENT, kWindowClass,
+                                    kAppTitle, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
+                                    sr::ui::Scale(980), sr::ui::Scale(680), nullptr, nullptr,
+                                    instance, nullptr);
         if (hwnd == nullptr) {
             Log(L"create_window_failed error=%lu", GetLastError());
             CloseLog();
@@ -4010,6 +3065,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
         MSG message;
         while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+            // 轮 55：键盘可达（Tab 换焦点 / Enter 触发 / Esc 收起面板）。
+            // 在派发前拦截，避免自绘控件各自实现一套 Tab 逻辑。
+            if (message.message == WM_KEYDOWN && g_app != nullptr &&
+                g_app->workbench.HandleKeyDown(message.wParam)) {
+                continue;
+            }
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }

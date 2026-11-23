@@ -7,13 +7,22 @@ add_executable(sr-ui WIN32
     AppConfig.cpp
     FileOps.cpp
     RecorderController.cpp
+    # 轮 55（0.2-1）：UI 基座拆分（主题 / 绘制 / 布局 / 控件 / 工作台 / 主窗口 / 列表窗口）
+    ui/theme.cpp
+    ui/draw.cpp
+    ui/layout.cpp
+    ui/controls.cpp
+    ui/workbench.cpp
+    ui/main_window.cpp
+    ui/list_window.cpp
 )
 
 target_include_directories(sr-ui PRIVATE ${CMAKE_SOURCE_DIR}/src)
 # per-monitor v2 / GetDpiForWindow 需要 Win10 目标；MinGW 默认头版本较旧。
 target_compile_definitions(sr-ui PRIVATE _WIN32_WINNT=0x0A00 NTDDI_VERSION=0x0A000006 WINVER=0x0A00)
 # 轮 32（M5-06）：录制列表用 ListView，需要 comctl32（系统组件，不是三方依赖）。
-target_link_libraries(sr-ui PRIVATE sr_ipc sr_core sr_diag user32 shell32 gdi32 ole32 mfplat mfuuid comctl32)
+# 轮 55：gdiplus 是系统组件（Windows SDK / MinGW 自带），不是三方依赖；用于抗锯齿自绘。
+target_link_libraries(sr-ui PRIVATE sr_ipc sr_core sr_diag user32 shell32 gdi32 gdiplus ole32 mfplat mfuuid comctl32)
 
 # F3：测试注入开关（--preflight-fail / --set-*）由宏隔离；打包时 -DSR_TEST_HOOKS=OFF。
 if(SR_TEST_HOOKS)
