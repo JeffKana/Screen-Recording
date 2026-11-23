@@ -4,11 +4,13 @@
 # B 目标被独占占用：持有文件锁时仍能录完并落地到新名字，不判失败
 # C 不可写 / 无法建目录：开录前即报错（record_exit=13），不产生碎片文件
 #
-# Usage: pwsh -File verify/cases/g3_output.ps1 [-BuildDir build-msvc] [-Config Release]
+# Usage: pwsh -File verify/cases/g3_output.ps1 [-BuildDir build-msvc] [-Config Release] [-RecorderPath <exe>]
 
 param(
     [string]$BuildDir = 'build-msvc',
-    [string]$Config = 'Release'
+    [string]$Config = 'Release',
+    # 轮 54（R1-52）：指定被测 recorder（用于「先红后绿」——拿 0.1.0 的旧 exe 跑同一份用例）。
+    [string]$RecorderPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -21,6 +23,7 @@ trap { Clear-SrProcesses -IncludeNameFallback; Write-Host "FAIL: $_"; exit 1 }
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $exe = Join-Path $root (Join-Path $BuildDir "bin\$Config\sr-recorder.exe")
 if (-not (Test-Path $exe)) { $exe = Join-Path $root (Join-Path $BuildDir 'bin\sr-recorder.exe') }
+if ($RecorderPath -ne '') { $exe = (Resolve-Path $RecorderPath).Path }
 if (-not (Test-Path $exe)) { Write-Host "FAIL: sr-recorder.exe not found"; exit 2 }
 
 function Resolve-FfmpegBin {
@@ -132,6 +135,60 @@ $resOut = Field $fifth 'output'
 $staleIntact = (Test-Path $stalePart) -and ((Get-Item $stalePart).Length -eq 16)
 Assert 'stale-part-untouched' $staleIntact "part_bytes=$((Get-Item $stalePart).Length)（残留的 .part 不得被新录制覆盖）"
 Assert 'residue-avoided-name' ($resOut -eq $res) "output=$resOut"
+
+Write-Host '--- E 并发抢同一 --out：.part 原子占位 (R1-52) ---'
+# 两个 recorder 抢同一个 --out。测试构建有 --wait-for-part：两个进程等到同一个屏障文件
+# 出现才去选名，把「同一毫秒」变成确定性事件（没有屏障时撞车率只有 ~10%，修好了也测不出来）。
+# 旧构建 / 交付包没有这个开关，自动退化成普通并发起跑 —— 同一份用例既能跑红也能跑绿。
+$iterations = 20
+$helpText = & $exe --help 2>&1 | Out-String
+$hasBarrier = $helpText -match '--wait-for-part'
+$produced = @()
+$corrupt = 0
+$badExit = 0
+$collided = 0
+for ($i = 1; $i -le $iterations; $i++) {
+    $raceTarget = Join-Path $work ('conc{0:D2}.mkv' -f $i)
+    $barrier = Join-Path $work ('conc{0:D2}.barrier' -f $i)
+    $procs = @()
+    $logs = @()
+    foreach ($tag in @('a', 'b')) {
+        $log = Join-Path $work ('conc{0:D2}.{1}.log' -f $i, $tag)
+        $recArgs = @('--record', '--seconds', '1', '--fps', '15', '--bitrate', '1500',
+            '--out', "`"$raceTarget`"")
+        if ($hasBarrier) { $recArgs += @('--wait-for-part', "`"$barrier`"") }
+        $procs += Start-Process -FilePath $exe -PassThru -WindowStyle Hidden `
+            -RedirectStandardOutput $log -ArgumentList $recArgs
+        $logs += $log
+    }
+    if ($hasBarrier) {
+        Start-Sleep -Milliseconds 800
+        New-Item -ItemType File -Force $barrier | Out-Null
+    }
+    foreach ($p in $procs) {
+        $p.WaitForExit(120000) | Out-Null
+        if ($p.ExitCode -ne 0) { $badExit++ }
+    }
+    $reservedThisRound = @()
+    foreach ($log in $logs) {
+        $text = Get-Content $log -Raw -ErrorAction SilentlyContinue
+        $o = Field $text 'output'
+        if ($o -ne '') {
+            $produced += $o
+            if (-not (Test-Playable $o)) { $corrupt++ }
+        }
+        # 轮 54：这一行是「谁占到了哪个临时文件」。两个进程同时选名时必然不同 —— 撞车的直接证据。
+        if ($text -match '(?m)output reserved: (.+?\.part)\s*$') { $reservedThisRound += $Matches[1] }
+    }
+    if ($reservedThisRound.Count -eq 2 -and $reservedThisRound[0] -ne $reservedThisRound[1]) { $collided++ }
+}
+$unique = @($produced | Sort-Object -Unique)
+$expected = 2 * $iterations
+Assert 'r54-concurrent-no-corruption' ($corrupt -eq 0 -and $produced.Count -eq $expected) `
+    ("并发 {0} 轮 × 2 进程（屏障={1}）：产物 {2} 个 / 损坏 {3} 个 / 撞车轮数 {4}" -f $iterations, $hasBarrier, $produced.Count, $corrupt, $collided)
+$residue = @(Get-ChildItem $work -Filter 'conc*.part' -ErrorAction SilentlyContinue).Count
+Assert 'r54-concurrent-stable-outcome' ($badExit -eq 0 -and $unique.Count -eq $expected -and $residue -eq 0) `
+    ("exit≠0 次数={0}；互不覆盖的不同文件名 {1} 个（期望 {2}）；.part 残留 {3} 个" -f $badExit, $unique.Count, $expected, $residue)
 
 Write-Host ''
 Write-Host ("RESULT: {0} PASS / {1} FAIL" -f $script:pass, $script:fail)

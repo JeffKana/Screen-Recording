@@ -95,6 +95,8 @@ struct Options {
     uint64_t fail_write_after = 0;
     // 轮 52（R2）：MP4 faststart 预留区字节数（0 = 按 --seconds/--fps 自动估算）。
     uint64_t mp4_reserve_bytes = 0;
+    // 轮 54（R1-52）：确定性竞态屏障文件（只在 SR_TEST_HOOKS 构建里被接受）。
+    std::string wait_for_part;
     bool fail_resume_backend = false;
     std::string fallback_dir;
     std::string control_pipe;
@@ -158,6 +160,7 @@ void PrintUsage() {
         "  --diag-window-test <file> 用合成日志验证诊断包「只留最近 10 分钟」的裁剪\n"
         "  --fail-resume / --fail-encoder [hardware|software|all] / --fail-write-after <n> / --fail-resume-backend\n"
         "  --mp4-reserve <bytes>    人为指定 MP4 faststart 预留区（0=自动；调小可验证回退路径）\n"
+        "  --wait-for-part <file>   等到该文件出现再选输出路径（R1-52 并发抢同一 --out 的确定性注入）\n"
         "  --fallback-dir <dir> / --fallback-commit <part>\n"
         "  --probe-repeat <n>    与 --list-encoders 合用：同进程重复探测 n 次（重试/泄漏护栏）\n");
 #endif
@@ -317,6 +320,9 @@ bool ParseArgs(int argc, char** argv, Options& options) {
         } else if (std::strcmp(arg, "--mp4-reserve") == 0 && i + 1 < argc) {
             // 轮 52（R2）：人为指定 faststart 预留区字节数，用于验证回退路径（0 = 自动估算）。
             options.mp4_reserve_bytes = std::strtoull(argv[++i], nullptr, 10);
+        } else if (std::strcmp(arg, "--wait-for-part") == 0 && i + 1 < argc) {
+            // 轮 54（R1-52）：等到该文件出现再选输出路径 —— 让两个 recorder 在同一微秒撞同一 --out。
+            options.wait_for_part = argv[++i];
         } else if (std::strcmp(arg, "--fail-resume-backend") == 0) {
             options.fail_resume_backend = true;
         } else if (std::strcmp(arg, "--inject-drop-every") == 0 && i + 1 < argc) {
@@ -832,6 +838,7 @@ int main(int argc, char** argv) {
     record_options.encoder_id = options.encoder_id;
         record_options.fail_write_after = options.fail_write_after;
         record_options.mp4_reserve_bytes = options.mp4_reserve_bytes;
+        record_options.wait_for_part = options.wait_for_part;
         record_options.fail_resume_backend = options.fail_resume_backend;
         record_options.fallback_dir = options.fallback_dir;
         record_options.control_pipe = options.control_pipe;

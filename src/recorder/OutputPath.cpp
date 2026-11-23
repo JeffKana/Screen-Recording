@@ -3,14 +3,22 @@
 #include "core/util/FreePath.h"
 #include "core/util/PathProbe.h"
 
+#include <fcntl.h>
+#include <io.h>
+#include <windows.h>
+
 #include <cstdio>
 #include <filesystem>
+#include <string>
 #include <vector>
 
 namespace sr::recorder {
 namespace {
 
 constexpr int kMaxIndex = 999;
+// `.part` 变体上限：同名 `.part`（崩溃残留 / 另一个 recorder 正在写）最多避让 10 次，
+// 再往上就让成品名进一位 —— 保证循环一定有界，不会在极端情况下转圈。
+constexpr int kMaxPartVariants = 10;
 
 std::filesystem::path WithIndex(const std::filesystem::path& base, int index) {
     const std::string stem = base.stem().string();
@@ -35,7 +43,49 @@ bool FindFreePath(const std::filesystem::path& base, std::filesystem::path& out,
     return true;
 }
 
+// `.part` 的第 n 个候选名：n=0 → `x.mkv.part`，n≥1 → `x.mkv.<n>.part`（沿用 D-32 的命名）。
+std::filesystem::path PartCandidate(const std::filesystem::path& final_path, int variant) {
+    if (variant == 0) {
+        return std::filesystem::path(final_path.string() + ".part");
+    }
+    return std::filesystem::path(final_path.string() + "." + std::to_string(variant) + ".part");
+}
+
+// CREATE_NEW 独占创建：文件已存在则失败，成功即「选名 + 占用」一步完成（R1-52）。
+// 共享模式只给 FILE_SHARE_READ：录制中其它进程可以读（--list 的实时快照、ffprobe），
+// 但不能再打开一份写句柄覆盖正在写的内容。
+std::FILE* CreateReservedFile(const std::filesystem::path& path, DWORD& win_error) {
+    HANDLE handle = ::CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                                  CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        win_error = ::GetLastError();
+        return nullptr;
+    }
+    const int fd = ::_open_osfhandle(reinterpret_cast<intptr_t>(handle), _O_BINARY);
+    if (fd < 0) {
+        win_error = ERROR_OPEN_FAILED;
+        ::CloseHandle(handle);
+        return nullptr;
+    }
+    // 句柄已经打开且为空文件，这里只取流：不截断、不重开（重开就会把原子性丢了）。
+    std::FILE* file = ::_fdopen(fd, "r+b");
+    if (file == nullptr) {
+        win_error = ERROR_OPEN_FAILED;
+        ::_close(fd);
+        return nullptr;
+    }
+    win_error = ERROR_SUCCESS;
+    return file;
+}
+
 }  // namespace
+
+void CloseReservedPart(OutputPlan& plan) {
+    if (plan.part_file != nullptr) {
+        std::fclose(plan.part_file);
+        plan.part_file = nullptr;
+    }
+}
 
 bool PrepareOutputPath(const std::string& requested, OutputPlan& plan, std::string& error) {
     if (requested.empty()) {
@@ -51,32 +101,43 @@ bool PrepareOutputPath(const std::string& requested, OutputPlan& plan, std::stri
         return false;
     }
 
-    // 同名不覆盖：取第一个空位（M5-15）。
-    // 不能写成「存在就换下一个」的循环：那样 999 个都被占用时会把已存在的 _999
-    // 当作可用路径返回，方向上是覆盖而不是拒绝（D-24 的 off-by-one 半边）。
-    std::filesystem::path candidate;
-    int conflict_index = 0;
-    if (!FindFreePath(target, candidate, conflict_index)) {
-        error = "too many files with the same name (limit " + std::to_string(kMaxIndex) +
-                "): " + target.string();
-        return false;
-    }
-    const bool renamed = conflict_index != 0;
-
-    plan.final_path = candidate.string();
-    plan.part_path = plan.final_path + ".part";
-    plan.renamed_for_conflict = renamed;
-
-    // .part 也可能残留（上次崩溃），同样避让，避免覆盖尚未恢复的数据。
-    int part_index = 1;
+    // 同名不覆盖 + 原子占位（M5-15 / R1-52）：
+    // 逐个候选名去 CREATE_NEW 它的 `.part`，成功即完成「选名 + 占用」一步。
+    // 不能先 exists() 再 fopen：两个 recorder 会在同一毫秒选中同一个 `.part`，
+    // 互相截断/覆盖，产物 EBML 损坏而两边都 exit 0 —— 这正是 R1-52。
     std::error_code ec;
-    while (std::filesystem::exists(plan.part_path, ec)) {
-        plan.part_path = plan.final_path + "." + std::to_string(part_index++) + ".part";
-        ec.clear();
+    for (int index = 0; index <= kMaxIndex; ++index) {
+        const std::filesystem::path candidate = index == 0 ? target : WithIndex(target, index);
+        // 成品已存在 → 换下一个名字（成品绝不覆盖，D-24）。
+        if (std::filesystem::exists(candidate, ec)) {
+            ec.clear();
+            continue;
+        }
+        for (int variant = 0; variant < kMaxPartVariants; ++variant) {
+            const std::filesystem::path part = PartCandidate(candidate, variant);
+            DWORD win_error = ERROR_SUCCESS;
+            std::FILE* file = CreateReservedFile(part, win_error);
+            if (file != nullptr) {
+                plan.final_path = candidate.string();
+                plan.part_path = part.string();
+                plan.renamed_for_conflict = index != 0;
+                plan.part_file = file;
+                error.clear();
+                return true;
+            }
+            if (win_error != ERROR_FILE_EXISTS && win_error != ERROR_ALREADY_EXISTS) {
+                // 权限 / 磁盘满 / 路径非法：不是并发，再试也没用，直接拒绝（M8-06）。
+                error = "cannot create temp file (win error " + std::to_string(win_error) +
+                        "): " + part.string();
+                return false;
+            }
+            // 同名 `.part` 已存在：崩溃残留（D-32）或另一个 recorder 正在写（R1-52）→ 顺延。
+        }
     }
 
-    error.clear();
-    return true;
+    error = "too many files with the same name (limit " + std::to_string(kMaxIndex) +
+            "): " + target.string();
+    return false;
 }
 
 bool CommitOutput(const OutputPlan& plan, std::string& actual_final, std::string& error) {

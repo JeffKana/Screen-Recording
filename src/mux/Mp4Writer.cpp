@@ -459,8 +459,17 @@ bool Mp4Writer::WriteRaw(const void* data, size_t size) {
 }
 
 bool Mp4Writer::Open(const std::string& path, std::string& error) {
+    std::FILE* file = std::fopen(path.c_str(), "wb+");
+    if (file == nullptr) {
+        error = "cannot open output file: " + path;
+        return false;
+    }
+    return AdoptOpen(file, path, error);
+}
+
+bool Mp4Writer::AdoptOpen(std::FILE* file, const std::string& path, std::string& error) {
     path_ = path;
-    file_ = std::fopen(path.c_str(), "wb+");
+    file_ = file;
     if (file_ == nullptr) {
         error = "cannot open output file: " + path;
         return false;

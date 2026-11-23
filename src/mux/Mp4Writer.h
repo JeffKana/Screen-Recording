@@ -35,6 +35,9 @@ public:
     using AudioTrackInfo = sr::mux::AudioTrackInfo;
 
     bool Open(const std::string& path, std::string& error);
+    // 轮 54（R1-52）：接管调用方以 CREATE_NEW 独占创建的句柄（选名与占用不可分割）。
+    // 所有权：无论返回 true/false，句柄都归本类关闭。
+    bool AdoptOpen(std::FILE* file, const std::string& path, std::string& error);
     bool SetVideoTrack(const VideoTrackInfo& info, std::string& error);
     bool SetAudioTrack(const AudioTrackInfo& info, std::string& error);
 

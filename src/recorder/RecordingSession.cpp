@@ -1,10 +1,12 @@
 #include "recorder/RecordingSession.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <memory>
+#include <thread>
 #include <vector>
 
 #include "audio/AudioTimeline.h"
@@ -71,6 +73,13 @@ public:
     bool FaststartFallback() const { return mp4_.FaststartFallback(); }
     bool Open(const std::string& path, std::string& error) {
         return IsMp4() ? mp4_.Open(path, error) : mkv_.Open(path, error);
+    }
+    // 轮 54（R1-52）：接管 OutputPath 用 CREATE_NEW 占位好的句柄（所有权转给写入器）。
+    bool Open(const std::string& path, std::string& error, std::FILE* reserved) {
+        if (reserved == nullptr) {
+            return Open(path, error);
+        }
+        return IsMp4() ? mp4_.AdoptOpen(reserved, path, error) : mkv_.AdoptOpen(reserved, path, error);
     }
     bool SetVideoTrack(const sr::mux::VideoTrackInfo& info, std::string& error) {
         return IsMp4() ? mp4_.SetVideoTrack(info, error) : mkv_.SetVideoTrack(info, error);
@@ -313,6 +322,25 @@ int RecordingSession::Run(const Options& options, Stats& stats, std::string& err
     MuxerRouter muxer(options.format);
     // 录制中写临时文件，正常收尾才改名为成品（M5-04）；崩溃后残留的 .part 供恢复流程处理。
     // 建目录、可写探测、同名避让统一在 PrepareOutputPath 里做（M5-15 / M8-06）。
+#if defined(SR_TEST_HOOKS)
+    // 轮 54（R1-52）：确定性竞态注入 —— 等到屏障文件出现再选路径，
+    // 让两个 recorder 在同一微秒进入 PrepareOutputPath。没有这个屏障，
+    // 两个进程的编码器初始化耗时不同，撞上同一毫秒的概率只有 ~10%（2/20），
+    // 修好了也测不出来。只在测试构建里存在，交付包不含。
+    if (!options.wait_for_part.empty()) {
+        Log("waiting for barrier: " + options.wait_for_part);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+        while (std::chrono::steady_clock::now() < deadline) {
+            std::error_code wait_ec;
+            if (std::filesystem::exists(options.wait_for_part, wait_ec)) {
+                break;
+            }
+            wait_ec.clear();
+            std::this_thread::yield();
+        }
+    }
+#endif
+
     sr::recorder::OutputPlan output_plan;
     if (!sr::recorder::PrepareOutputPath(options.output_path, output_plan, error)) {
         Log(std::string("output path rejected: ") + error);
@@ -321,11 +349,18 @@ int RecordingSession::Run(const Options& options, Stats& stats, std::string& err
     if (output_plan.renamed_for_conflict) {
         Log("target already exists, writing to: " + output_plan.final_path);
     }
+    // 轮 54（R1-52）：把「实际占到的临时文件名」打出来。
+    // 两个进程同时抢同一个 --out 时，这一行必然不同（CREATE_NEW 保证只有一个能拿到 X.part），
+    // 所以它是「撞车真的发生了」的可核证据，而不是只靠「没坏」推断。
+    Log("output reserved: " + output_plan.part_path);
     const std::string part_path = output_plan.part_path;
     muxer.SetFailWriteAfter(options.fail_write_after);
     // 轮 52（R2）：按 --seconds/--fps 估 moov 上界，开录时先把位置占住（MP4 专用）。
     muxer.SetFaststartReserve(options.seconds, options.fps, options.mp4_reserve_bytes);
-    if (!muxer.Open(part_path, error)) {
+    // 占用句柄移交给写入器：无论 Open 成败都由它关闭（不再自己 fclose，避免双重关闭）。
+    std::FILE* reserved_part = output_plan.part_file;
+    output_plan.part_file = nullptr;
+    if (!muxer.Open(part_path, error, reserved_part)) {
         Log(std::string("muxer open failed: ") + error);
         return 7;
     }
