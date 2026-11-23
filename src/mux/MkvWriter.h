@@ -27,6 +27,11 @@ public:
     using AudioTrackInfo = sr::mux::AudioTrackInfo;
 
     bool Open(const std::string& path, std::string& error);
+    // 轮 54（R1-52）：接管一个已经由调用方 **独占创建**（CREATE_NEW）的句柄。
+    // 为什么需要它：先查存在再 fopen 是 TOCTOU —— 两个 recorder 会在同一毫秒选中同一个
+    // `.part`，互相覆盖写坏。改成由 OutputPath 原子创建后把句柄交进来，选名与占用不可分割。
+    // 所有权：无论返回 true/false，句柄都归本类（析构 / Close 关闭）。
+    bool AdoptOpen(std::FILE* file, const std::string& path, std::string& error);
     bool SetVideoTrack(const VideoTrackInfo& info, std::string& error);
     // 轮 49（M3-09#2）：每调用一次追加一条音轨（第 1 次 = TrackNumber 2）。
     // 单音轨只调用一次 —— 输出的 EBML 与轮 48 逐字节一致（回归口径）。

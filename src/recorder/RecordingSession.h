@@ -92,6 +92,10 @@ public:
         // 轮 30（M6-03）：人为丢帧注入（调试开关，SR_TEST_HOOKS）。
         // >0 时每 N 帧跳过编码提交并计入 frames_dropped，用于验证「丢帧计数可见 + 日志有 dropped=」。
         uint32_t inject_drop_every = 0;
+        // 轮 54（R1-52）：确定性竞态注入（调试开关，SR_TEST_HOOKS）。
+        // 非空时：开录前一直等这个文件出现，再进 PrepareOutputPath。
+        // 用途是让两个 recorder 在同一微秒抢同一个 --out，没有它撞车率只有 ~10%（2/20）。
+        std::string wait_for_part;
     };
 
     struct Stats {

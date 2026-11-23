@@ -148,12 +148,13 @@ try {
         "build_time=$([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))",
         "build_flags=SR_TEST_HOOKS=OFF;SR_BUILD_TOOLS=OFF",
         # 轮 50：rc 与 GA 的区分写在包里，避免"包名是 rc、内容像 GA"的歧义（docs/23 §5）。
-        # 轮 53（docs/27 §2 两级发布模型）：channel 改三态——
-        #   含 "-rc." → rc；等于 "0.1.0" → mvp；其余 → ga。
-        #   mvp 的 ga_ready 必须为 0：0.1 是 MVP 不是 GA（docs/27 §6 第 3 条），
-        #   真机兼容与 B 机基线补齐前不许把它当 1.0 发。
-        "channel=$(if ($Version -match '-rc\.') { 'rc' } elseif ($Version -eq '0.1.0') { 'mvp' } else { 'ga' })",
-        "ga_ready=$(if ($Version -match '-rc\.' -or $Version -eq '0.1.0') { '0' } else { '1' })"
+        # 轮 53（docs/27 §2 两级发布模型）：channel 改三态——含 "-rc." → rc；"0.1.0" → mvp；其余 → ga。
+        # 轮 54（轮 54 卡 P0-2）：补第四态 —— **0.1.x（x≥1）→ mvp-patch**。
+        #   0.1 线的补丁既不新增功能、也远不是 GA，用 mvp-patch 与 mvp 区分开，
+        #   免得以后拿 0.1.1 冒充 0.1.0 的「首版」，也免得被当成 ga。
+        #   ga_ready 在 rc / mvp / mvp-patch 下都必须是 0：真机兼容与 B 机基线补齐前不许当 1.0 发（docs/27 §6）。
+        "channel=$(if ($Version -match '-rc\.') { 'rc' } elseif ($Version -match '^0\.1\.[1-9][0-9]*$') { 'mvp-patch' } elseif ($Version -eq '0.1.0') { 'mvp' } else { 'ga' })",
+        "ga_ready=$(if ($Version -match '-rc\.' -or $Version -match '^0\.1\.[0-9]+$') { '0' } else { '1' })"
     ) -join "`n"
     [System.IO.File]::WriteAllText((Join-Path $packageRoot 'VERSION.txt'), $versionText + "`n",
                                    [System.Text.UTF8Encoding]::new($false))
